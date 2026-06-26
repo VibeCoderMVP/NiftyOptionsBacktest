@@ -117,12 +117,18 @@ Before placing orders, open Nifty option chain and verify:
 
 ## 6. Exit Execution
 
-**Passive exit (recommended):** Hold all 6 legs until expiry. On expiry day (Tuesday in new regime, Thursday in old):
-- ITM options will be exercised automatically by exchange at intrinsic value
-- OTM options expire worthless (you keep full premium)
-- Near-ATM options may have a few points of residual value — optionally buy back at 15:20 to avoid pin risk
+**Mandatory active exit — always close by 15:25 on expiry day.** Never let short options expire unattended.
 
-**Active exit option:** Close all legs at 15:25 on expiry day via buy orders. Cleaner P&L accounting, avoids exercise logistics.
+Reasons:
+- **STT (Securities Transaction Tax):** Short options that expire ITM are taxed as if exercised at intrinsic value, not at the premium you collected. The STT on an exercised short can significantly exceed your collected premium.
+- **Pin risk:** In the final 10 minutes of Tuesday/Thursday, institutional delta-hedging creates sharp Nifty moves of 30–50 points. An OTM option with LTP = Rs 2 can become deep ITM within 5 minutes.
+- **Saving Rs 120 in brokerage is not worth a multi-thousand rupee surprise.**
+
+**Exit procedure (15:20–15:28 on expiry day):**
+1. Check option chain for all 6 legs
+2. Place BUY limit orders at current LTP (or a few rupees above to ensure fill)
+3. Confirm all 6 fills before 15:29
+4. For any leg with LTP < Rs 2 — still buy back; the STT risk is not worth the Rs 2 saving
 
 **Do NOT:**
 - Set stop losses mid-week (defeats the theta-harvest purpose; creates more losses from whipsaws)
@@ -135,33 +141,40 @@ Before placing orders, open Nifty option chain and verify:
 
 ## 7. Backtest Results Summary
 
-All results are **per lot** (1 lot = 75 shares). Brokerage estimated at Rs 20/leg/lot.
+**Lot size note:** Nifty lot size changed from 25 to 75 shares effective Nov 20, 2024 (SEBI F&O reform).  
+The backtest applies the correct historical lot size to each cycle — pre-Nov 2024 P&L is calculated at lot=25, post-Nov 2024 at lot=75. Numbers are not comparable across regimes in absolute Rs terms for this reason; the points-level win rates and averages are comparable.
 
-### New regime (Sep 2025+) — 4-day hold, Thu entry → Tue exit, 38 cycles
+Brokerage estimated at Rs 20/leg/lot.
 
-| Config | Trades | Win % | Avg P&L/trade | Total P&L | Max Single Loss | Avg Entry Premium |
-|--------|--------|-------|---------------|-----------|-----------------|-------------------|
-| 1L_SELL | 32 | 81.2% | +Rs 8,682 | +Rs 2.78L | -Rs 4,416 | Rs 276 |
-| **3L_SELL** | **36** | **83.3%** | **+Rs 23,805** | **+Rs 8.57L** | **-Rs 7,792** | **Rs 760** |
-| 5L_SELL | 38 | 86.8% | +Rs 38,195 | +Rs 14.5L | -Rs 10,806 | Rs 1,215 |
+**"Avg Entry Premium" is in index points** (sum of all 6 leg LTPs). Multiply by lot size for rupee value.
 
-### Old regime (Jan 2023–Aug 2025) — 4-day hold, Mon entry → Thu exit, 123 cycles
+### New regime (Sep 2025+) — 4-day hold, Thu entry → Tue exit | lot size = 75 throughout
 
-| Config | Trades | Win % | Avg P&L/trade | Total P&L | Max Single Loss | Avg Entry Premium |
-|--------|--------|-------|---------------|-----------|-----------------|-------------------|
-| 1L_SELL | 118 | 78.8% | +Rs 6,264 | +Rs 7.39L | -Rs 7,578 | Rs 224 |
-| **3L_SELL** | **123** | **81.3%** | **+Rs 17,808** | **+Rs 21.9L** | **-Rs 17,572** | **Rs 637** |
-| 5L_SELL | 128 | 82.8% | +Rs 29,201 | +Rs 37.4L | -Rs 24,391 | Rs 1,035 |
+| Config | Trades | Win % | Avg P&L/trade | Total P&L | Max Single Loss | Avg Entry Premium (pts) |
+|--------|--------|-------|---------------|-----------|-----------------|--------------------------|
+| 1L_SELL | 32 | 81.2% | +Rs 8,682 | +Rs 2.78L | -Rs 4,416 | 276 pts (= Rs 20,715/lot) |
+| **3L_SELL** | **36** | **83.3%** | **+Rs 23,805** | **+Rs 8.57L** | **-Rs 7,792** | **760 pts (= Rs 56,993/lot)** |
+| 5L_SELL | 38 | 86.8% | +Rs 38,195 | +Rs 14.5L | -Rs 10,806 | 1,215 pts (= Rs 91,125/lot) |
 
-### Old regime — 2-day hold, Tue entry → Thu exit, 133 cycles
+### Old regime (Jan 2023–Aug 2025) — 4-day hold, Mon entry → Thu exit | lot size = 25 (most cycles)
+
+| Config | Trades | Win % | Avg P&L/trade | Total P&L | Max Single Loss | Avg Entry Premium (pts) |
+|--------|--------|-------|---------------|-----------|-----------------|--------------------------|
+| 1L_SELL | 118 | 76.3% | +Rs 3,838 | +Rs 4.53L | -Rs 7,578 | 224 pts |
+| **3L_SELL** | **123** | **81.3%** | **+Rs 10,900** | **+Rs 13.4L** | **-Rs 17,228** | **637 pts** |
+| 5L_SELL | 128 | 82.8% | +Rs 17,759 | +Rs 22.7L | -Rs 24,391 | 1,035 pts |
+
+### Old regime — 2-day hold, Tue entry → Thu exit | lot size = 25 (most cycles)
 
 | Config | Trades | Win % | Avg P&L/trade | Total P&L | Max Single Loss |
 |--------|--------|-------|---------------|-----------|-----------------|
-| 1L_SELL | 128 | 69.5% | +Rs 4,120 | +Rs 5.27L | -Rs 8,819 |
-| 3L_SELL | 132 | 69.7% | +Rs 11,977 | +Rs 15.8L | -Rs 22,249 |
-| 5L_SELL | 133 | 71.4% | +Rs 20,906 | +Rs 27.8L | -Rs 27,238 |
+| 1L_SELL | 128 | 68.0% | +Rs 2,684 | +Rs 3.44L | -Rs 5,211 |
+| 3L_SELL | 132 | 69.7% | +Rs 7,722 | +Rs 10.2L | -Rs 14,723 |
+| 5L_SELL | 133 | 71.4% | +Rs 13,198 | +Rs 17.6L | -Rs 16,190 |
 
 **Key finding:** 4-day hold beats 2-day hold on every metric — higher win rate, higher avg P&L, and *lower* max loss. This is counter-intuitive but makes sense: more days of theta decay means more of the premium is collected before the option goes to near-zero, so most weeks you're cutting a well-decayed position rather than a freshly-alive one.
+
+**Why new regime shows higher Rs P&L than old regime:** Partly because lot size is 3× larger (75 vs 25), and partly because new regime captures a slightly higher-volatility post-2025 market. Compare win rates and points P&L for a like-for-like view.
 
 ---
 
@@ -465,15 +478,16 @@ The tick format is identical — just different security IDs.
 
 | Parameter | Value |
 |-----------|-------|
-| Nifty lot size | 75 shares |
+| Nifty lot size (current, post Nov 2024) | 75 shares |
+| Nifty lot size (pre Nov 20, 2024) | 25 shares |
 | Strike step | 50 points |
 | Entry time | ~15:20 IST (entry day) |
-| Exit time | ~15:25 IST (expiry day) |
+| Exit time | ~15:25 IST (expiry day) — mandatory active close |
 | 3L legs | 6 (sell 3 strikes × CE+PE) |
-| Typical 3L entry premium | Rs 450–1,600 (depends on VIX) |
+| Typical 3L entry premium (new regime) | 450–1,600 pts = Rs 34K–120K at lot 75 |
 | Win rate (new regime, 3L) | 83% |
 | Max observed loss (3L, new regime) | Rs 7,792 per lot |
-| Avg profit (new regime, 3L) | Rs 23,805 per lot per week |
+| Avg net profit (new regime, 3L) | Rs 23,805 per lot per week |
 | Brokerage estimate | Rs 20/leg/lot = Rs 120 for 3L |
 
 ---

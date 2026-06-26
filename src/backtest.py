@@ -32,7 +32,7 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
-from src.config import NIFTY_LOT_SIZE, STRIKE_STEP, settings
+from src.config import NIFTY_LOT_SIZE, STRIKE_STEP, lot_size_for_date, settings
 
 console = Console()
 
@@ -79,6 +79,10 @@ def compute_cycle_pnl(path: Path) -> dict | None:
     atm    = int(df["atm_strike"].iloc[0])
     regime = str(df["regime"].iloc[0]) if "regime" in df.columns else "thu_expiry"
 
+    from datetime import date as _date
+    _expiry_date = _date.fromisoformat(expiry)
+    lot_size = lot_size_for_date(_expiry_date)
+
     entry_bars = _last_bar(df, entry)
     exit_bars  = _last_bar(df, expiry)
 
@@ -111,6 +115,7 @@ def compute_cycle_pnl(path: Path) -> dict | None:
         "entry_spot":  spot,
         "atm_strike":  atm,
         "regime":      regime,
+        "lot_size":    lot_size,
         "n_legs_with_data": len(merged),
     }
 
@@ -133,7 +138,7 @@ def compute_cycle_pnl(path: Path) -> dict | None:
                 leg_pnl = legs["exit_price"] - legs["entry_price"]
 
             raw_pnl_pts  = float(leg_pnl.sum())                    # points (premium units)
-            pnl_rupees   = raw_pnl_pts * NIFTY_LOT_SIZE            # × lot size
+            pnl_rupees   = raw_pnl_pts * lot_size                  # × historic lot size
             brokerage    = BROKERAGE_PER_LEG * n_legs              # per lot estimate
             net_pnl      = pnl_rupees - brokerage
 
@@ -256,7 +261,7 @@ def print_summary(summaries: dict[str, pd.DataFrame]) -> None:
             _print_regime_table(summaries[regime], title)
     console.print()
     console.print(
-        f"[dim]P&L per lot ({NIFTY_LOT_SIZE} shares). "
+        f"[dim]P&L per lot. Lot sizes: 25 shares (pre Nov 20 2024) / {NIFTY_LOT_SIZE} shares (Nov 20 2024+). "
         f"Brokerage estimate: Rs{BROKERAGE_PER_LEG}/leg/lot.[/dim]"
     )
     console.print()
