@@ -21,7 +21,7 @@ Usage (always run from D:\\Trading\\NiftyOptionsBacktest\\):
       Prints a Rich table of any gaps.
 
   uv run python pipeline.py backtest
-      Run all 6 configurations (1L/3L/5L × BUY/SELL) across all weekly cycles.
+      Run all 6 configurations (1L/3L/5L x BUY/SELL) across all weekly cycles.
       Saves data/backtest_results.parquet and data/backtest_summary.csv.
       Prints a summary table.
 
@@ -32,15 +32,28 @@ Usage (always run from D:\\Trading\\NiftyOptionsBacktest\\):
       Run a DuckDB SQL query against the backtest results.
       Views available: 'results' (per-cycle P&L), 'options' (all bar data).
 
-      Examples:
-        uv run python pipeline.py query "SELECT Config, [Total P&L ₹] FROM summary"
-        uv run python pipeline.py query "SELECT expiry_date, 5L_SELL_net_rs FROM results ORDER BY 1"
-        uv run python pipeline.py query "SELECT strftime(expiry_date,'%Y-%m') as month, AVG(\\"1L_SELL_net_rs\\") as avg_pnl FROM results GROUP BY 1 ORDER BY 1"
+  uv run python pipeline.py signal [--force]
+      Run entry signal for today (Thursday in new regime).
+      Fetches Nifty spot, computes ATM, prints order slip, sends Telegram alert.
+      Saves ATM/expiry to data/.last_signal.json for paper-entry.
+      --force: run even if today is not Thursday (for testing).
+
+  uv run python pipeline.py paper-entry <spot> <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>
+      Log a paper trade entry after manually recording LTPs.
+      spot  = Nifty spot at time of entry
+      ltp1..6 in order: ATM-50 CE, ATM-50 PE, ATM CE, ATM PE, ATM+50 CE, ATM+50 PE
+      ATM is read from data/.last_signal.json (run 'signal' first).
+
+  uv run python pipeline.py paper-exit <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>
+      Log exit LTPs for the last open paper trade and compute P&L.
+      Same leg order as paper-entry.
+
+  uv run python pipeline.py paper-show
+      Print the full paper trade journal as a Rich table.
 """
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from datetime import date
 
@@ -52,6 +65,11 @@ load_dotenv()
 
 console = Console()
 
+ALL_COMMANDS = [
+    "test-api", "fetch", "build", "validate", "backtest", "all", "query",
+    "signal", "paper-entry", "paper-exit", "paper-show",
+]
+
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -60,15 +78,14 @@ def _make_parser() -> argparse.ArgumentParser:
         description="Nifty Options Ladder Backtest Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument(
-        "command",
-        choices=["test-api", "fetch", "build", "validate", "backtest", "all", "query"],
-        help="Pipeline step to run",
-    )
+    p.add_argument("command", choices=ALL_COMMANDS, help="Pipeline step to run")
     p.add_argument("--start",  default="2023-01-01", help="Backtest start date YYYY-MM-DD")
     p.add_argument("--end",    default="",           help="Backtest end date YYYY-MM-DD (default: today)")
-    p.add_argument("--force",  action="store_true",  help="Re-fetch even if cached")
-    p.add_argument("sql",      nargs="?",            help="SQL query (for 'query' command)")
+    p.add_argument("--force",  action="store_true",  help="Re-fetch cached data / override day check")
+    p.add_argument(
+        "extra_args", nargs="*",
+        help="Extra positional args: SQL query string, or LTP values for paper commands",
+    )
     return p
 
 
@@ -81,8 +98,9 @@ def cmd_test_api() -> None:
     console.print("[bold]Testing Dhan /charts/rollingoption API...[/bold]")
     resp = fetch_rolling_option(
         relative_strike="ATM",
+        option_type="CALL",
         from_date="2024-01-02",
-        to_date="2024-01-05",   # 4 days — one expiry week
+        to_date="2024-01-05",
         interval=5,
     )
     if resp is None:
@@ -90,13 +108,12 @@ def cmd_test_api() -> None:
         sys.exit(1)
 
     data = resp.get("data", {})
-    console.print(f"[green]API call succeeded.[/green]")
+    console.print("[green]API call succeeded.[/green]")
     console.print(f"Response keys in 'data': {list(data.keys()) if isinstance(data, dict) else type(data)}")
 
-    # Print first 3 bars of the CE side to show structure
-    ce = data.get("ce", {}) if isinstance(data, dict) else {}
-    keys = list(ce.keys())
-    n    = len(ce[keys[0]]) if keys else 0
+    ce     = data.get("ce", {}) if isinstance(data, dict) else {}
+    keys   = list(ce.keys())
+    n      = len(ce[keys[0]]) if keys else 0
     sample = [{k: ce[k][i] for k in keys} for i in range(min(3, n))]
 
     console.print(f"\n[bold]CE side keys:[/bold] {keys}")
@@ -115,9 +132,9 @@ def cmd_fetch(start: str, end: str, force: bool) -> None:
     from src.fetcher import fetch_all_streams
     effective_end = end or date.today().strftime("%Y-%m-%d")
     console.print(f"[bold]Fetching options data: {start} -> {effective_end}[/bold]")
-    console.print(f"  Streams: 9 relative strikes x 2 option types = 18 total")
-    console.print(f"  Chunks:  ~30-day windows per stream")
-    console.print(f"  Cache:   data/options/raw/  (--force to re-fetch all)")
+    console.print("  Streams: 9 relative strikes x 2 option types = 18 total")
+    console.print("  Chunks:  ~30-day windows per stream")
+    console.print("  Cache:   data/options/raw/  (--force to re-fetch all)")
     console.print()
     fetch_all_streams(start, effective_end, force=force)
 
@@ -147,14 +164,15 @@ def cmd_backtest() -> None:
         return
     summary = summary_stats(results)
     print_summary(summary)
-    console.print(f"Per-cycle detail  -> data/backtest_results.parquet")
-    console.print(f"Summary           -> data/backtest_summary.csv")
-    console.print(f"\nFor ad-hoc queries: uv run python pipeline.py query \"<SQL>\"")
+    console.print("Per-cycle detail  -> data/backtest_results.parquet")
+    console.print("Summary           -> data/backtest_summary.csv")
+    console.print('\nFor ad-hoc queries: uv run python pipeline.py query "<SQL>"')
 
 
-def cmd_query(sql: str | None) -> None:
+def cmd_query(extra_args: list[str]) -> None:
+    sql = " ".join(extra_args) if extra_args else ""
     if not sql:
-        console.print("[red]Provide a SQL string: pipeline.py query \"SELECT ...\"[/red]")
+        console.print('[red]Provide a SQL string: pipeline.py query "SELECT ..."[/red]')
         sys.exit(1)
     from src.backtest import open_duckdb
     con = open_duckdb()
@@ -166,6 +184,73 @@ def cmd_query(sql: str | None) -> None:
         console.print("[dim]Available views: 'options' (bar data), 'results' (per-cycle P&L)[/dim]")
     finally:
         con.close()
+
+
+def cmd_signal(force: bool) -> None:
+    from src.signal import run_signal
+    run_signal(force=force)
+
+
+def cmd_paper_entry(extra_args: list[str]) -> None:
+    """
+    paper-entry <spot> <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>
+
+    ATM is read from data/.last_signal.json (run 'signal' first).
+    """
+    from src.signal import load_last_signal
+    from src.paper_trade import log_entry
+
+    sig = load_last_signal()
+    if sig is None:
+        console.print("[red]No saved signal found. Run 'signal' first to set ATM.[/red]")
+        sys.exit(1)
+
+    if len(extra_args) < 7:
+        console.print(
+            "[red]Usage: paper-entry <spot> <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>[/red]\n"
+            "[dim]LTP order: ATM-50 CE, ATM-50 PE, ATM CE, ATM PE, ATM+50 CE, ATM+50 PE[/dim]"
+        )
+        sys.exit(1)
+
+    try:
+        spot     = float(extra_args[0])
+        leg_ltps = [float(x) for x in extra_args[1:7]]
+    except ValueError:
+        console.print("[red]All values must be numbers.[/red]")
+        sys.exit(1)
+
+    log_entry(
+        atm        = sig["atm"],
+        legs_ltps  = leg_ltps,
+        entry_spot = spot,
+    )
+
+
+def cmd_paper_exit(extra_args: list[str]) -> None:
+    """
+    paper-exit <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>
+    """
+    from src.paper_trade import log_exit
+
+    if len(extra_args) < 6:
+        console.print(
+            "[red]Usage: paper-exit <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>[/red]\n"
+            "[dim]LTP order: ATM-50 CE, ATM-50 PE, ATM CE, ATM PE, ATM+50 CE, ATM+50 PE[/dim]"
+        )
+        sys.exit(1)
+
+    try:
+        exit_ltps = [float(x) for x in extra_args[:6]]
+    except ValueError:
+        console.print("[red]All values must be numbers.[/red]")
+        sys.exit(1)
+
+    log_exit(exit_ltps)
+
+
+def cmd_paper_show() -> None:
+    from src.paper_trade import show_journal
+    show_journal()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -188,6 +273,7 @@ def main() -> None:
     args   = parser.parse_args()
     start  = args.start
     end    = args.end or date.today().strftime("%Y-%m-%d")
+    extra  = args.extra_args or []
 
     if args.command == "test-api":
         cmd_test_api()
@@ -215,7 +301,19 @@ def main() -> None:
         cmd_backtest()
 
     elif args.command == "query":
-        cmd_query(args.sql)
+        cmd_query(extra)
+
+    elif args.command == "signal":
+        cmd_signal(force=args.force)
+
+    elif args.command == "paper-entry":
+        cmd_paper_entry(extra)
+
+    elif args.command == "paper-exit":
+        cmd_paper_exit(extra)
+
+    elif args.command == "paper-show":
+        cmd_paper_show()
 
 
 if __name__ == "__main__":

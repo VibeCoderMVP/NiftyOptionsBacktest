@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     dhan_client_id:    str
     dhan_access_token: SecretStr
 
+    telegram_bot_token: str = ""   # optional: for entry signal alerts
+    telegram_chat_id:   str = ""   # optional: your Telegram chat/channel ID
+
     backtest_start: str = "2023-01-01"
     backtest_end:   str = ""           # defaults to today in pipeline.py
 
