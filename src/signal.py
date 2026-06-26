@@ -170,7 +170,7 @@ def load_last_signal() -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def run_signal(force: bool = False) -> None:
+def run_signal(force: bool = False, spot: float | None = None) -> None:
     today = _ist_now().date()
     now   = _ist_now()
 
@@ -182,26 +182,30 @@ def run_signal(force: bool = False) -> None:
         )
         return
 
-    if not is_market_open():
-        console.print(
-            f"[yellow]Market is closed (IST {now.strftime('%H:%M')}). "
-            f"Spot price may be stale.[/yellow]"
-        )
+    if spot is not None:
+        console.print(f"[dim]Using provided spot: {spot:.0f}[/dim]")
+    else:
+        if not is_market_open():
+            console.print(
+                f"[yellow]Market is closed (IST {now.strftime('%H:%M')}). "
+                f"Spot price may be stale.[/yellow]"
+            )
 
-    console.print("[bold]Fetching Nifty 50 spot price...[/bold]")
-    spot = get_nifty_spot()
+        console.print("[bold]Fetching Nifty 50 spot price...[/bold]")
+        spot = get_nifty_spot()
 
-    if spot is None:
-        console.print("[red]Auto-fetch failed (market may be closed or API unavailable).[/red]")
-        try:
-            raw = input("Enter Nifty spot price manually (or press Enter to abort): ").strip()
-            if not raw:
-                console.print("[red]Aborted.[/red]")
+        if spot is None:
+            console.print("[red]Auto-fetch failed (market may be closed or API unavailable).[/red]")
+            console.print("[dim]Tip: run with --spot 24178 to skip the API fetch.[/dim]")
+            try:
+                raw = input("Enter Nifty spot price manually (or press Enter to abort): ").strip()
+                if not raw:
+                    console.print("[red]Aborted.[/red]")
+                    return
+                spot = float(raw)
+            except (ValueError, EOFError):
+                console.print("[red]Invalid input. Aborted. Use --spot <price> to bypass.[/red]")
                 return
-            spot = float(raw)
-        except (ValueError, EOFError):
-            console.print("[red]Invalid input. Aborted.[/red]")
-            return
 
     atm         = compute_atm(spot)
     expiry_date = next_expiry_tuesday(today)

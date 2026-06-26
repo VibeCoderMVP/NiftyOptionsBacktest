@@ -82,6 +82,7 @@ def _make_parser() -> argparse.ArgumentParser:
     p.add_argument("--start",  default="2023-01-01", help="Backtest start date YYYY-MM-DD")
     p.add_argument("--end",    default="",           help="Backtest end date YYYY-MM-DD (default: today)")
     p.add_argument("--force",  action="store_true",  help="Re-fetch cached data / override day check")
+    p.add_argument("--spot",   type=float, default=None, help="Override Nifty spot price for signal (skip API fetch)")
     p.add_argument(
         "extra_args", nargs="*",
         help="Extra positional args: SQL query string, or LTP values for paper commands",
@@ -186,9 +187,9 @@ def cmd_query(extra_args: list[str]) -> None:
         con.close()
 
 
-def cmd_signal(force: bool) -> None:
+def cmd_signal(force: bool, spot: float | None = None) -> None:
     from src.signal import run_signal
-    run_signal(force=force)
+    run_signal(force=force, spot=spot)
 
 
 def cmd_paper_entry(extra_args: list[str]) -> None:
@@ -304,7 +305,7 @@ def main() -> None:
         cmd_query(extra)
 
     elif args.command == "signal":
-        cmd_signal(force=args.force)
+        cmd_signal(force=args.force, spot=args.spot)
 
     elif args.command == "paper-entry":
         cmd_paper_entry(extra)
