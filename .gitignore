@@ -1,0 +1,21 @@
+# credentials — never commit
+.env
+
+# virtual environment
+.venv/
+
+# raw API data and computed outputs — regenerate with pipeline.py
+data/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

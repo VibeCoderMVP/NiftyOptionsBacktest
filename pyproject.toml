@@ -1,0 +1,19 @@
+[project]
+name = "nifty-options-backtest"
+version = "0.1.0"
+description = "Nifty weekly options ladder backtest — Dhan API + DuckDB + Parquet"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "duckdb>=0.10",
+    "pydantic-settings>=2.0",
+    "loguru>=0.7",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+    "truststore>=0.9",
+]
+
+[tool.uv]
+# uv sync to set up; uv run python pipeline.py <command>
