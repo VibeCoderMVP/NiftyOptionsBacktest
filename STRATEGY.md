@@ -233,201 +233,200 @@ Republic Day, Holi, Ram Navami, Mahavir Jayanti, Good Friday, Eid, Independence 
 
 ---
 
-## 11. Two-Week Simulation Protocol
+## 11. Forward Testing Protocol
 
-Before going live, run this paper-trading drill for 2 weeks:
+The automated pipeline (Phase 2) handles this each week. For the first few weeks, verify the automation is working correctly:
 
-### Week 1 — Entry Thursday Jun 26, 2026 / Exit Tuesday Jul 1, 2026
+### Each Thursday at 15:20 IST
 
-**On Thursday Jun 26 at 15:20 IST:**
-1. Note Nifty spot on terminal
-2. Calculate ATM (round to nearest 50)
-3. Open option chain for Jul 1 expiry
-4. Record the following for all 6 legs:
+ET should auto-fire the entry signal. If it doesn't (ET not running, config has auto_entry=false):
+```
+SIGNAL.bat    → waits until 15:10, prints order slip, writes active_options_position.json
+ENTRY.bat     → run after fills; prompts for 6 LTPs; logs to options_journal.jsonl
+```
 
-| Leg | Strike | Type | LTP at 15:20 | LTP at 15:28 | Would-be fill |
-|-----|--------|------|--------------|--------------|---------------|
-| 1 | ATM-50 | CE | | | |
-| 2 | ATM-50 | PE | | | |
-| 3 | ATM | CE | | | |
-| 4 | ATM | PE | | | |
-| 5 | ATM+50 | CE | | | |
-| 6 | ATM+50 | PE | | | |
+Verify after entry:
+- `D:\Trading\active_options_position.json` exists and has `"status": "open"`
+- ET Options tab (F4) shows all 6 legs with live LTPs updating
+- `data/options_journal.jsonl` has a new entry with `"outcome": null`
 
-5. Record total premium (sum of column 4 or 5)
-6. Check margin requirement on broker app
+### Each Tuesday (expiry day) at 15:25 IST
 
-**On Monday Jun 30 and Tuesday Jul 1:**
-1. Note option chain LTPs at 15:20
-2. Fill in exit premiums
-3. Calculate P&L: (entry_premium - exit_premium) × 75 - brokerage
+ET auto-closes. If ET not running:
+```
+EXIT.bat    → prompts for 6 buyback LTPs; logs exit; marks position closed
+```
 
-**Repeat for Week 2:** Entry Thursday Jul 3 / Exit Tuesday Jul 8
+Verify after exit:
+- `data/options_journal.jsonl` last entry has `"outcome": "WIN"` or `"outcome": "LOSS"` and non-null exit_ltp for all legs
+- `D:\Trading\active_options_position.json` has `"status": "closed"`
+- ET Options tab shows no open position
+
+### First week sanity check
+
+After week 1, run:
+```
+uv run python pipeline.py paper-show    (shows current or last closed paper trade P&L)
+```
+
+Compare logged P&L to your actual broker P&L. The gap should be < 2% (slippage). If larger, check that you're logging the correct fill prices.
 
 ### Simulation success criteria
-- You successfully identified ATM on both entry days within 5 minutes
-- You understand which expiry contract you're selling (front week, not next)
-- You can see the margin requirement before placing orders
-- You tracked P&L correctly on both exit days
+- AT ran the entry signal without intervention
+- ET showed all 6 live LTPs by 15:25 Thursday
+- Exit fired automatically at 15:25 Tuesday
+- paper-show P&L matches broker P&L within Rs 200 (Rs 1-5 slippage per leg × 6 legs × 2 sides)
 
 ---
 
-## 12. EasyTerminal — Options Tab Design
+## 12. EasyTerminal — Options Tab (LIVE as of 2026-06-27)
 
-### New tab: "Options [F4]" or sub-tab under SIM
+**Status: BUILT.** The Options tab is in production at `D:\Trading\EasyTerminal\`.
 
-Add to `app.py` as a new `TabPane` inside the existing `TabbedContent`:
-```python
-with TabPane("Options  [F4]", id="tab-options"):
-    yield OptionsPanel(id="options-panel")
-```
+### Tab: "Options [F4]"
 
-### `OptionsPanel` — layout
+Keyboard shortcut F4 from within ET's SIM view. Shows the current open position (if any) plus completed cycle history.
+
+### What it displays
 
 ```
-┌─ NIFTY WEEKLY OPTIONS ──────────────────────────────────────────────────────┐
-│ Regime: tue_expiry  │  Entry: Thu 2026-06-26 15:27  │  Expiry: Tue 2026-07-01
-│ Entry Spot: 24178   │  ATM: 24200                   │  Days left: 4 / Hold: 4
-├─────────────────────────────────────────────────────────────────────────────┤
-│  Strike  │ Type │ Lots │ Entry LTP │ LTP (live) │ P&L pts │ P&L Rs  │ Status
-│──────────┼──────┼──────┼───────────┼────────────┼─────────┼─────────┼───────
-│  24150   │  CE  │  1   │   85.40   │   42.10    │ +43.30  │ +3248   │ OPEN
-│  24150   │  PE  │  1   │  102.20   │   58.90    │ +43.30  │ +3248   │ OPEN
-│  24200   │  CE  │  1   │  112.80   │   65.30    │ +47.50  │ +3563   │ OPEN
-│  24200   │  PE  │  1   │   98.60   │   52.10    │ +46.50  │ +3488   │ OPEN
-│  24250   │  CE  │  1   │   88.10   │   48.20    │ +39.90  │ +2993   │ OPEN
-│  24250   │  PE  │  1   │  112.50   │   66.30    │ +46.20  │ +3465   │ OPEN
-├─────────────────────────────────────────────────────────────────────────────┤
-│ TOTAL ENTRY PREMIUM: Rs 599.60  │  CURRENT: Rs 332.90  │  NET P&L: +Rs 20,003
-│ Margin blocked: ~Rs 1.20L       │  Premium decay: 44.5% │  Win if < Rs 599.60
-└─────────────────────────────────────────────────────────────────────────────┘
+NIFTY WEEKLY OPTIONS [PAPER]  |  Entry: 2026-06-26 15:21  |  Expiry: 2026-07-01  |  DTE: 4  |  ATM: 24050
++---------+------+-----------+-----------+----------+------------+---------+
+| Strike  | Type | Entry LTP |  Mkt LTP  |  P&L pts |   P&L Rs   | Status  |
++---------+------+-----------+-----------+----------+------------+---------+
+|  24000  |  CE  |    158.35 |    122.50 |   +35.85 |  +2,689 Rs |  LIVE   |
+|  24000  |  PE  |     65.55 |     92.10 |   -26.55 |  -1,991 Rs |  LIVE   |
+|  24050  |  CE  |    127.15 |     98.30 |   +28.85 |  +2,164 Rs |  LIVE   |
+|  24050  |  PE  |     83.60 |    108.40 |   -24.80 |  -1,860 Rs |  LIVE   |
+|  24100  |  CE  |     99.00 |     78.55 |   +20.45 |  +1,534 Rs |  LIVE   |
+|  24100  |  PE  |    105.35 |    131.20 |   -25.85 |  -1,939 Rs |  LIVE   |
++---------+------+-----------+-----------+----------+------------+---------+
+Entry: 639.00 pts (Rs 47,925) | Curr: 630.05 pts | Unreal P&L: +8.95 pts = +Rs 671 | [C] = Force Close
+Config: Ladder=3L | Auto-Entry=ON @ 15:20 IST | Auto-Exit=ON @ 15:25 IST | Mode=PAPER | Edit: D:\Trading\options_config.json
 ```
 
-### Data model — add to `models.py`
+### Auto-entry (Thursday 15:20 IST)
 
-```python
-@dataclass
-class ETOptionsLeg:
-    strike: int
-    option_type: str       # "CE" or "PE"
-    lots: int
-    entry_ltp: float
-    current_ltp: float     # updated live via ZMQ ticks
-    entry_time: str        # "2026-06-26 15:27"
-    status: str            # "OPEN" | "EXPIRED" | "CLOSED"
+ET's 30-second scheduler fires when: weekday=Thursday, time>=15:20, `options_config.json` has `auto_entry=true`, no open position exists.
 
-    @property
-    def pnl_pts(self) -> float:
-        return self.entry_ltp - self.current_ltp   # SELL: profit when price falls
+What happens automatically:
+1. ET runs `pipeline.py signal` subprocess (fetches Nifty spot, computes ATM, writes `active_options_position.json` with security IDs)
+2. `tick_service.py` detects the file mtime change within 10s, subscribes to all 6 NSE_FNO contracts
+3. ZMQ ticks begin arriving in ET's `ZmqOptionsWorker` (port 5555 primary or 5557 fallback)
+4. When all 6 legs have at least one live LTP, ET calls `log_entry()` and reloads the panel
+5. You: open broker app and place 6 SELL limit orders manually
 
-    @property
-    def pnl_rs(self) -> float:
-        return self.pnl_pts * 75 * self.lots
+### Auto-exit (Tuesday 15:25 IST on expiry day)
 
-@dataclass
-class ETOptionsPosition:
-    regime: str            # "tue_expiry" or "thu_expiry_4day"
-    entry_date: str        # "2026-06-26"
-    expiry_date: str       # "2026-07-01"
-    entry_spot: float
-    atm_strike: int
-    legs: list[ETOptionsLeg]
-    margin_blocked: float  # from broker
+Scheduler detects open position with `expiry_date == today` and time >= 15:25. Calls `log_exit()` with current live LTPs. You: confirm fills in broker app.
 
-    @property
-    def total_entry_premium(self) -> float:
-        return sum(leg.entry_ltp for leg in self.legs)
+### Force-close (C key, any time)
 
-    @property
-    def total_current_premium(self) -> float:
-        return sum(leg.current_ltp for leg in self.legs)
+Press `C` on Options tab → modal shows current per-leg live LTPs → confirm with Y or Enter → `log_exit()` called immediately. Use when mid-week news makes you want to exit early.
 
-    @property
-    def total_pnl_rs(self) -> float:
-        return sum(leg.pnl_rs for leg in self.legs)
+### Config
 
-    @property
-    def days_to_expiry(self) -> int:
-        from datetime import date
-        return (date.fromisoformat(self.expiry_date) - date.today()).days
-```
-
-### Persistence — options trade log
-
-Store each completed options cycle in `data/options_journal.jsonl` (one JSON per line):
-
+`D:\Trading\options_config.json` — edit directly, ET re-reads every 30s:
 ```json
 {
-  "regime": "tue_expiry",
-  "entry_date": "2026-06-26",
-  "expiry_date": "2026-07-01",
-  "entry_spot": 24178.0,
-  "atm_strike": 24200,
-  "legs": [
-    {"strike": 24150, "option_type": "CE", "lots": 1, "entry_ltp": 85.40, "exit_ltp": 2.10, "entry_time": "2026-06-26 15:27", "exit_time": "2026-07-01 15:28"},
-    {"strike": 24150, "option_type": "PE", "lots": 1, "entry_ltp": 102.20, "exit_ltp": 8.30, "entry_time": "2026-06-26 15:27", "exit_time": "2026-07-01 15:28"},
-    ...
-  ],
-  "total_entry_premium": 599.60,
-  "total_exit_premium": 44.10,
-  "gross_pnl_pts": 555.50,
-  "gross_pnl_rs": 41662.50,
-  "brokerage_rs": 120.0,
-  "net_pnl_rs": 41542.50,
-  "margin_blocked": 120000.0,
-  "outcome": "WIN"
+  "ladder_size": "3L",
+  "entry_time_ist": "15:20",
+  "exit_time_ist": "15:25",
+  "auto_entry": true,
+  "auto_exit": true,
+  "lots": 1,
+  "strategy": "SELL",
+  "paper_mode": true
 }
 ```
 
-### Stats tab — add options section
-Alongside the existing MCIC/DCVWAP stats, add:
-- Total options cycles completed
-- Win rate (%)
-- Total premium collected (all-time)
-- Total net P&L (all-time)
-- Current open position P&L
+### Persistence — options_journal.jsonl schema
+
+`data/options_journal.jsonl` — one JSON object per line. `outcome: null` = still open.
+
+```json
+{
+  "batch_id": "20260626-152100",
+  "ladder_size": "3L",
+  "regime": "tue_expiry",
+  "entry_date": "2026-06-26",
+  "expiry_date": "2026-07-01",
+  "entry_time": "2026-06-26 15:21",
+  "entry_spot": 24050.0,
+  "atm_strike": 24050,
+  "lot_size": 75,
+  "lots": 1,
+  "legs": [
+    {"strike": 24000, "type": "CE", "entry_ltp": 158.35, "exit_ltp": null, "exit_time": null},
+    ...6 total...
+  ],
+  "total_entry_premium": 639.0,
+  "total_exit_premium": null,
+  "gross_pnl_pts": null,
+  "gross_pnl_rs": null,
+  "net_pnl_rs": null,
+  "outcome": null,
+  "paper_trade": true
+}
+```
+
+P&L: `gross_pnl_pts = total_entry_premium - total_exit_premium` (profit when total premium falls).
+Brokerage: Rs 20/leg/lot per side × 6 legs × 2 sides = **Rs 240/trade** (entry + exit combined).
+`net_pnl_rs = gross_pnl_pts * lot_size * lots - 240`
 
 ---
 
 ## 13. Live Architecture Roadmap
 
-### Phase 1: Manual + monitoring (now)
+### Phase 1: Manual + monitoring — COMPLETE
 ```
-You (manual) → place orders in Dhan app at 15:20
-→ record entry in options_journal.jsonl manually
-→ EasyTerminal Options tab reads journal file + shows live LTPs via tick
-```
-
-### Phase 2: Semi-automated entry signal
-```
-Script runs at 15:15 on entry day
-→ fetches Nifty spot from Dhan REST API
-→ calculates ATM + 6 strikes
-→ prints order slip to terminal / sends Telegram alert
-You → confirm + place orders manually
+You (manual): place 6 SELL orders in Dhan app at 15:20
+You (manual): record fills in options_journal.jsonl via ENTRY.bat / pipeline.py paper-entry
+EasyTerminal Options tab: reads journal + shows live LTPs via ZMQ tick
 ```
 
-### Phase 3: Fully automated
+### Phase 2: Signal automation — COMPLETE (as of 2026-06-27)
 ```
-Cron at 15:20 on entry day
-→ calculate strikes
+ET auto-entry at 15:20 Thursday:
+  → runs pipeline.py signal (fetches spot, computes ATM, writes active_options_position.json)
+  → tick_service.py subscribes to 6 NSE_FNO contracts (watches file mtime every 10s)
+  → ZMQ ticks flow to ET ZmqOptionsWorker (port 5555 primary, 5557 fallback)
+  → all 6 LTPs captured → log_entry() called automatically
+  → ET Options tab shows open position with live LTPs
+
+You (manual): open Dhan app, place 6 SELL limit orders
+              (fill prices have Rs 1-5 slippage vs logged LTPs — acceptable for forward testing)
+
+ET auto-exit at 15:25 Tuesday (expiry day):
+  → log_exit() called with current live LTPs
+  → position closed in journal + active_options_position.json
+
+You (manual): open Dhan app, buy back 6 legs
+              (or use force-close C key in ET if exiting early)
+
+Emergency fallbacks: SIGNAL.bat, ENTRY.bat, EXIT.bat in NiftyOptionsBacktest/
+```
+
+### Phase 3: Fully automated (not yet built)
+```
+ET or cron at 15:20 entry day
 → place 6 SELL orders via Dhan /orders API
-→ log to options_journal.jsonl
-→ Cron at 15:25 on exit day
-→ place 6 BUY orders (close position)
-→ calculate final P&L and log
+→ confirm fills → log actual fill prices to journal
+→ At 15:25 exit day
+→ place 6 BUY orders via Dhan /orders API
+→ calculate final P&L from actual fills
 ```
 
-**Dhan API endpoints needed for live execution:**
-- `GET /positions` — verify legs are open
-- `POST /orders` — place SELL/BUY orders
-- `GET /orders/{order_id}` — confirm fill price
-- `POST /charts/rollingoption` — already built (fetcher.py)
+**Dhan API endpoints needed for Phase 3:**
+- `POST /v2/orders` — place SELL/BUY orders
+- `GET /v2/orders/{order_id}` — confirm fill price and status
+- `GET /v2/positions` — verify legs are open before exit
 
-### ZMQ feed for live LTP in EasyTerminal
-The existing `tick_service.py` (TradingWebSockets P2) already publishes ticks on ZMQ port 5555.  
-For options, Dhan WebSocket security IDs for each strike need to be subscribed dynamically.  
-The tick format is identical — just different security IDs.
+**Constraint holding Phase 3 back:** Need real fill data to validate slippage before automating order placement. Run Phase 2 for at least 4-8 weeks to build a slippage distribution.
+
+### ZMQ live LTP architecture (implemented)
+
+`tick_service.py` (TradingWebSockets P2) publishes on port 5555. Option ticks use `OPT_{strike}_{type}` topic format (e.g. `OPT_24000_CE`). Equity subscribers (MCIC, DCVWAP) receive zero option messages — fully additive. Fallback: `options_ltp_service.py` (REST polling, port 5557). ET subscribes to both ports simultaneously.
 
 ---
 
@@ -461,15 +460,18 @@ The tick format is identical — just different security IDs.
 
 ```
 [ ] It is expiry day (Tuesday new regime / Thursday old regime)
-[ ] At 15:20 — check option chain LTPs for all 6 legs
-[ ] Calculate current mark-to-market P&L
-[ ] Decision: let expire OR buy back before 15:30?
-    → If all legs are OTM and LTP < Rs 5 each: let expire (save brokerage)
+[ ] ET auto-exit fires at 15:25 IST — OR — press [C] in ET Options tab to force-close
+[ ] If ET not running: run EXIT.bat (prompts for 6 buyback prices)
+[ ] At 15:20 — check option chain LTPs for all 6 legs in broker app
+[ ] Place BUY limit orders for all 6 legs (even legs with LTP < Rs 2 — STT risk is real)
+[ ] Decision: let expire OR buy back?
+    → If all legs are OTM and LTP < Rs 2 each AND you are certain: let expire (save Rs 120 brokerage)
     → If any leg is ITM or LTP > Rs 20: buy back at 15:25 to avoid pin risk
-[ ] Record exit premiums for each leg
-[ ] Calculate net P&L: (entry_total - exit_total) × 75 - brokerage
-[ ] Update options_journal.jsonl
-[ ] Telegram notification to self with P&L
+    → When in doubt: buy back. STT on an exercised short ITM option >> brokerage saved
+[ ] Confirm all 6 fills in broker app by 15:29
+[ ] Record exit premiums for each leg in options_journal.jsonl (ET handles this if auto-exit fired)
+[ ] Verify ET Options tab now shows no open position (or paper-show shows WIN/LOSS)
+[ ] Telegram notification to self with P&L (sent automatically by ET or logged to activity log)
 ```
 
 ---
@@ -505,4 +507,4 @@ The edge is statistical. It requires running this consistently for months, not c
 ---
 
 *Document generated from NiftyOptionsBacktest pipeline | Data: Dhan API | Storage: DuckDB + Parquet*  
-*Last updated: 2026-06-27 | Backtest range: 2023-01-01 to 2026-06-26*
+*Last updated: 2026-06-27 | Backtest range: 2023-01-01 to 2026-06-26 | Phase 2 automation live*
