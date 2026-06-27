@@ -407,22 +407,78 @@ You (manual): open Dhan app, buy back 6 legs
 Emergency fallbacks: SIGNAL.bat, ENTRY.bat, EXIT.bat in NiftyOptionsBacktest/
 ```
 
-### Phase 3: Fully automated (not yet built)
+### Phase 3: Fully automated (target: evaluate after end of July 2026)
+
+**Go-live gate:** Run Phase 2 through end of July 2026 (4–5 full weekly cycles). Analyze slippage journal before enabling Phase 3. Do not rush this.
+
+**What Phase 3 adds:**
 ```
-ET or cron at 15:20 entry day
-→ place 6 SELL orders via Dhan /orders API
-→ confirm fills → log actual fill prices to journal
-→ At 15:25 exit day
-→ place 6 BUY orders via Dhan /orders API
-→ calculate final P&L from actual fills
+ET auto-entry fires at 15:20 Thursday
+→ pre-flight margin check: GET /v2/fundlimit
+  → if availableBalance < 2.0 * total_entry_premium * lot_size * lots:
+       abort, log CRITICAL, send Telegram alert
+  → if margin OK: proceed
+→ place 6 SELL limit orders: POST /v2/orders (one per leg)
+→ poll GET /v2/orders/{order_id} for each leg (120s timeout)
+  → if all 6 FILLED: log_entry() with actual fill prices, not signal LTPs
+  → if timeout or partial fill: trigger mitigation (see Partial Fill Handling below)
+
+ET auto-exit fires at 15:25 Tuesday (expiry day)
+→ flip active_options_position.json status to "exit_processing" (locks scheduler)
+→ place 6 BUY orders: POST /v2/orders
+→ poll fills (120s timeout)
+→ log_exit() with verified fill prices
+→ status → "closed"
 ```
 
-**Dhan API endpoints needed for Phase 3:**
+**Dhan API endpoints needed:**
 - `POST /v2/orders` — place SELL/BUY orders
 - `GET /v2/orders/{order_id}` — confirm fill price and status
-- `GET /v2/positions` — verify legs are open before exit
+- `GET /v2/positions` — verify open legs before exit
+- `GET /v2/fundlimit` — pre-flight margin check
 
-**Constraint holding Phase 3 back:** Need real fill data to validate slippage before automating order placement. Run Phase 2 for at least 4-8 weeks to build a slippage distribution.
+#### Prerequisite 1: Slippage calibration
+
+Build `analyse_slippage.py` after 4+ cycles of Phase 2 data:
+```
+slippage_per_leg = actual_fill_price - signal_ltp_at_15:20
+```
+If median slippage > Rs 5/leg consistently, introduce staggered entry (legs 10s apart) rather than firing all 6 simultaneously — wide bid-ask on outer strikes means a burst of 6 orders at once can move the market against you.
+
+#### Prerequisite 2: Sandbox idempotency test
+
+Before going live, test `POST /v2/orders` in Dhan's sandbox with duplicate `correlationId` values within a 500ms window. If sandbox returns HTTP 400 on the duplicate, server-side idempotency is confirmed. If it allows both, `active_options_position.json` status check remains the sole guard — which is fine, since it's deterministic and local.
+
+#### Partial fill handling
+
+A partial fill is the worst outcome: short the calls, puts didn't fill → naked directional exposure. Reconciliation logic:
+
+```
+After 120s polling timeout:
+  → Check which of 6 legs filled
+  → If any unfilled:
+       Option A (panic close): fire immediate BUY market orders for all filled legs
+       Option B (alert & halt): Telegram CRITICAL alert, flip status to "exit_processing",
+                                 freeze scheduler, wait for manual override via ET
+  → Default to Option B — preserve capital, wait for human decision
+```
+
+#### Atomic force-close in Phase 3
+
+When `C` is pressed in ET (or auto-exit fires), the sequence must be strictly ordered:
+1. Flip `active_options_position.json` status to `"exit_processing"` — locks out scheduler immediately
+2. Fire 6 BUY orders via `POST /v2/orders`
+3. Poll fills (120s); log each fill price as it arrives
+4. Only after all confirms: call `log_exit()` with verified prices, flip status to `"closed"`
+5. If polling times out: Telegram alert, leave status as `"exit_processing"`, human decides
+
+**Do not call log_exit() until fills are confirmed.** Journal and market state must never diverge.
+
+#### Safety properties that don't need to change for Phase 3
+
+- `active_options_position.json` status check as local idempotency guard — already bulletproof
+- `ForceCloseModal` C → modal → Y/Enter confirmation — do not add extra key chords; this is correct
+- `batch_id` in journal — already unique per entry; use as `correlationId` prefix per leg
 
 ### ZMQ live LTP architecture (implemented)
 
