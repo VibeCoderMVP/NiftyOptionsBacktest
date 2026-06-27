@@ -13,6 +13,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "rich>=13.0",
     "truststore>=0.9",
+    "pyzmq>=25.0",
 ]
 
 [tool.uv]

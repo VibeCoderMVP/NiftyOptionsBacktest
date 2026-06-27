@@ -21,6 +21,8 @@ from rich.table import Table
 
 from src.config import DHAN_API_BASE, NIFTY_LOT_SIZE, settings
 
+ACTIVE_OPTIONS_PATH = Path(r"D:\Trading\active_options_position.json")
+
 truststore.inject_into_ssl()
 console = Console()
 
@@ -163,6 +165,62 @@ def save_last_signal(entry_date: date, expiry_date: date, spot: float, atm: int)
     )
 
 
+def write_active_position(
+    entry_date: date,
+    expiry_date: date,
+    spot: float,
+    atm: int,
+    legs: list[dict],
+    entry_ltps: list[float] | None = None,
+) -> None:
+    """
+    Write D:\\Trading\\active_options_position.json — the shared coordination file
+    read by options_ltp_service.py and EasyTerminal to know which contracts to track.
+
+    legs: list of {"strike": int, "type": "CE"|"PE"} from build_order_slip()
+    entry_ltps: 6 floats in ATM-50 CE/PE, ATM CE/PE, ATM+50 CE/PE order (optional)
+    """
+    from src.dhan_instruments import resolve_option_ids
+
+    strikes = [atm - 50, atm, atm + 50]
+    try:
+        resolved = resolve_option_ids(strikes, expiry_date)
+    except Exception as exc:
+        logger.warning("Could not resolve option security IDs ({}); writing without IDs", exc)
+        resolved = [
+            {"strike": s, "option_type": t, "security_id": "", "exchange_segment": "NSE_FNO"}
+            for s in strikes for t in ("CE", "PE")
+        ]
+
+    # Merge entry LTPs into resolved contracts (order matches build_order_slip)
+    contracts = []
+    for i, c in enumerate(resolved):
+        entry_ltp = entry_ltps[i] if entry_ltps and i < len(entry_ltps) else None
+        contracts.append({**c, "entry_ltp": entry_ltp})
+
+    payload = {
+        "status":       "open",
+        "updated_at":   _ist_now().isoformat(timespec="seconds"),
+        "entry_date":   str(entry_date),
+        "expiry_date":  str(expiry_date),
+        "atm":          atm,
+        "entry_spot":   spot,
+        "contracts":    contracts,
+    }
+
+    ACTIVE_OPTIONS_PATH.write_text(
+        json.dumps(payload, indent=2, default=str),
+        encoding="utf-8",
+    )
+    logger.info(
+        "Active position written -> {} | ATM={} expiry={} ids={}",
+        ACTIVE_OPTIONS_PATH,
+        atm,
+        expiry_date,
+        [c["security_id"] for c in contracts],
+    )
+
+
 def load_last_signal() -> dict | None:
     path = Path(settings.data_dir) / ".last_signal.json"
     if not path.exists():
@@ -181,6 +239,36 @@ def run_signal(force: bool = False, spot: float | None = None) -> None:
             f"Use --force to run anyway.[/yellow]"
         )
         return
+
+    # Timing guard: on a real Thursday, wait until the entry window opens
+    if not force and is_entry_day(force=False):
+        entry_start = now.replace(hour=15, minute=10, second=0, microsecond=0)
+        entry_end   = now.replace(hour=15, minute=35, second=0, microsecond=0)
+        if now < entry_start:
+            import time as _time
+            console.print(
+                f"[bold cyan]Signal will fire at 15:10 IST.[/bold cyan] "
+                f"Current time: {now.strftime('%H:%M:%S')} IST — waiting..."
+            )
+            while True:
+                now = _ist_now()
+                entry_start = now.replace(hour=15, minute=10, second=0, microsecond=0)
+                remaining = (entry_start - now).total_seconds()
+                if remaining <= 0:
+                    break
+                mins, secs = divmod(int(remaining), 60)
+                console.print(
+                    f"\r[dim]  Signal at 15:10 IST — {mins:02d}:{secs:02d} remaining...[/dim]",
+                    end="",
+                )
+                _time.sleep(5)
+            console.print()  # newline after countdown
+            now = _ist_now()  # refresh after wait
+        if now > entry_end:
+            console.print(
+                f"[yellow]Note: It is {now.strftime('%H:%M')} IST — market is near close. "
+                f"Spot may reflect closing price rather than the 15:20 candle. Proceeding.[/yellow]"
+            )
 
     if spot is not None:
         console.print(f"[dim]Using provided spot: {spot:.0f}[/dim]")
@@ -239,8 +327,10 @@ def run_signal(force: bool = False, spot: float | None = None) -> None:
     msg = format_signal_message(spot, atm, legs, today, expiry_date)
     send_telegram(msg)
     save_last_signal(today, expiry_date, spot, atm)
+    write_active_position(today, expiry_date, spot, atm, legs)
     logger.info("Signal complete | ATM={} expiry={} spot={:.0f}", atm, expiry_date, spot)
     console.print(f"[dim]Signal saved -> data/.last_signal.json[/dim]")
+    console.print(f"[dim]Active position file -> {ACTIVE_OPTIONS_PATH}[/dim]")
     console.print(
         f"\n[dim]Next step: after placing orders, run:[/dim]\n"
         f"[bold]uv run python pipeline.py paper-entry "

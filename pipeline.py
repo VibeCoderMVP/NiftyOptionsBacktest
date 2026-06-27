@@ -84,6 +84,11 @@ def _make_parser() -> argparse.ArgumentParser:
     p.add_argument("--force",  action="store_true",  help="Re-fetch cached data / override day check")
     p.add_argument("--spot",   type=float, default=None, help="Override Nifty spot price for signal (skip API fetch)")
     p.add_argument(
+        "--entry-date", default=None, dest="entry_date",
+        help="Override entry date for paper-entry (YYYY-MM-DD, default: today). "
+             "Useful when backfilling Thursday's trade on a later day.",
+    )
+    p.add_argument(
         "extra_args", nargs="*",
         help="Extra positional args: SQL query string, or LTP values for paper commands",
     )
@@ -192,11 +197,12 @@ def cmd_signal(force: bool, spot: float | None = None) -> None:
     run_signal(force=force, spot=spot)
 
 
-def cmd_paper_entry(extra_args: list[str]) -> None:
+def cmd_paper_entry(extra_args: list[str], entry_date_str: str | None = None) -> None:
     """
     paper-entry <spot> <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>
 
-    ATM is read from data/.last_signal.json (run 'signal' first).
+    ATM and expiry are read from data/.last_signal.json (run 'signal' first).
+    Use --entry-date YYYY-MM-DD to backfill a Thursday trade logged on a later day.
     """
     from src.signal import load_last_signal
     from src.paper_trade import log_entry
@@ -220,11 +226,139 @@ def cmd_paper_entry(extra_args: list[str]) -> None:
         console.print("[red]All values must be numbers.[/red]")
         sys.exit(1)
 
+    entry_date = None
+    if entry_date_str:
+        try:
+            entry_date = date.fromisoformat(entry_date_str)
+        except ValueError:
+            console.print(f"[red]Invalid --entry-date '{entry_date_str}'. Use YYYY-MM-DD.[/red]")
+            sys.exit(1)
+
     log_entry(
         atm        = sig["atm"],
         legs_ltps  = leg_ltps,
         entry_spot = spot,
+        entry_date = entry_date,
     )
+
+
+def _get_open_record() -> dict | None:
+    import json
+    from pathlib import Path
+    journal = Path("data/options_journal.jsonl")
+    if not journal.exists():
+        return None
+    open_rec = None
+    for line in journal.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                r = json.loads(line)
+                if r.get("outcome") is None:
+                    open_rec = r
+            except json.JSONDecodeError:
+                pass
+    return open_rec
+
+
+def _check_exit_timing() -> bool:
+    """
+    Check whether it is the right time to exit.
+    Returns True if the caller should proceed with the exit immediately.
+    Returns False if the caller should abort (user chose not to exit early
+    and the auto-wait path timed out / was not applicable from CLI).
+
+    Behaviour:
+      - Before expiry day: asks Y/N. Y = exit now. N = abort (use ET or wait).
+      - On expiry day before 15:20: asks Y/N. N = block until 15:20 then return True.
+      - On expiry day at/after 15:20: proceed immediately (no prompt).
+    """
+    import time as _time
+    from datetime import datetime, timedelta, timezone
+
+    _IST = timedelta(hours=5, minutes=30)
+    now_ist = datetime.now(timezone.utc) + _IST
+    open_rec = _get_open_record()
+    if open_rec is None:
+        return True   # no open record — let log_exit handle the error
+
+    expiry_str = open_rec.get("expiry_date", "")
+    try:
+        expiry_date_obj = date.fromisoformat(expiry_str)
+    except (ValueError, TypeError):
+        return True   # can't parse — proceed
+
+    days_to_exp = (expiry_date_obj - now_ist.date()).days
+
+    if days_to_exp > 0:
+        # Before expiry day — definitely early
+        console.print(
+            f"\n[bold yellow]Early exit:[/bold yellow] Expiry is {expiry_str} "
+            f"({days_to_exp} day(s) away). Closing now forfeits remaining time decay."
+        )
+        try:
+            answer = input("Exit early? (Y/N): ").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            answer = "N"
+        if answer != "Y":
+            console.print("[dim]Aborted. Position remains open.[/dim]")
+            return False
+        return True
+
+    elif days_to_exp == 0:
+        # Expiry day — check time
+        target = now_ist.replace(hour=15, minute=20, second=0, microsecond=0)
+        if now_ist < target:
+            remaining = (target - now_ist).total_seconds()
+            mins, secs = divmod(int(remaining), 60)
+            console.print(
+                f"\n[bold yellow]Expiry day — exit window opens at 15:20 IST.[/bold yellow] "
+                f"Current time: {now_ist.strftime('%H:%M')} IST "
+                f"({mins}m {secs}s remaining)."
+            )
+            console.print(
+                "[dim]Closing before 15:20 leaves time value on the table and carries "
+                "pin risk through the close.[/dim]"
+            )
+            try:
+                answer = input("Exit early anyway? (Y/N): ").strip().upper()
+            except (EOFError, KeyboardInterrupt):
+                answer = "N"
+            if answer == "Y":
+                return True
+            # N = wait until 15:20 and then auto-exit
+            console.print(
+                f"[cyan]Waiting for 15:20 IST to auto-exit...[/cyan] "
+                f"Press Ctrl+C to abort."
+            )
+            try:
+                while True:
+                    now_ist = datetime.now(timezone.utc) + _IST
+                    target  = now_ist.replace(hour=15, minute=20, second=0, microsecond=0)
+                    remaining = (target - now_ist).total_seconds()
+                    if remaining <= 0:
+                        break
+                    mins, secs = divmod(int(remaining), 60)
+                    console.print(
+                        f"\r[dim]  Auto-exit at 15:20 — {mins:02d}:{secs:02d} remaining...[/dim]",
+                        end="",
+                    )
+                    _time.sleep(5)
+                console.print()
+            except KeyboardInterrupt:
+                console.print("\n[red]Aborted by user. Position remains open.[/red]")
+                return False
+            return True
+        else:
+            # At or past 15:20 — proceed immediately
+            return True
+
+    else:
+        # Past expiry (days_to_exp < 0) — something is wrong
+        console.print(
+            f"[yellow]Note: Expiry date {expiry_str} is in the past. Proceeding.[/yellow]"
+        )
+        return True
 
 
 def cmd_paper_exit(extra_args: list[str]) -> None:
@@ -232,6 +366,9 @@ def cmd_paper_exit(extra_args: list[str]) -> None:
     paper-exit <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>
     """
     from src.paper_trade import log_exit
+
+    if not _check_exit_timing():
+        return
 
     if len(extra_args) < 6:
         console.print(
@@ -308,7 +445,7 @@ def main() -> None:
         cmd_signal(force=args.force, spot=args.spot)
 
     elif args.command == "paper-entry":
-        cmd_paper_entry(extra)
+        cmd_paper_entry(extra, entry_date_str=args.entry_date)
 
     elif args.command == "paper-exit":
         cmd_paper_exit(extra)

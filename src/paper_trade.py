@@ -20,7 +20,11 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
+import os
+
 from src.config import NIFTY_LOT_SIZE, settings
+
+ACTIVE_OPTIONS_PATH = Path(os.environ.get("ACTIVE_OPTIONS_PATH", r"D:\Trading\active_options_position.json"))
 
 console = Console()
 
@@ -128,6 +132,10 @@ def log_entry(
     records.append(record)
     _save_journal(records)
 
+    # Backfill entry LTPs into the shared position file so the LTP service can
+    # show unrealized P&L from the moment paper-entry is run.
+    _update_active_position_ltps(legs_ltps)
+
     rs_collected = total_entry * lot_size * lots
     console.print(f"[green]Paper entry logged.[/green]")
     console.print(
@@ -186,6 +194,7 @@ def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> None:
 
     records[open_idx] = rec
     _save_journal(records)
+    _close_active_position()
 
     color = "green" if net_pnl_rs > 0 else "red"
     console.print(f"[{color}]Paper exit logged. Outcome: {rec['outcome']}[/{color}]")
@@ -201,6 +210,37 @@ def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> None:
         "Paper exit | outcome={} net_pnl_rs={:.0f} pnl_pts={:.2f}",
         rec["outcome"], net_pnl_rs, pnl_pts,
     )
+
+
+def _update_active_position_ltps(entry_ltps: list[float]) -> None:
+    """Merge confirmed entry LTPs into active_options_position.json after paper-entry."""
+    if not ACTIVE_OPTIONS_PATH.exists():
+        return
+    try:
+        data = json.loads(ACTIVE_OPTIONS_PATH.read_text(encoding="utf-8"))
+        contracts = data.get("contracts", [])
+        for i, ltp in enumerate(entry_ltps):
+            if i < len(contracts):
+                contracts[i]["entry_ltp"] = ltp
+        data["contracts"] = contracts
+        data["updated_at"] = _ist_now().isoformat(timespec="seconds")
+        ACTIVE_OPTIONS_PATH.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Could not update active position LTPs: {}", exc)
+
+
+def _close_active_position() -> None:
+    """Mark the active position as closed so the LTP service stops polling."""
+    if not ACTIVE_OPTIONS_PATH.exists():
+        return
+    try:
+        data = json.loads(ACTIVE_OPTIONS_PATH.read_text(encoding="utf-8"))
+        data["status"] = "closed"
+        data["updated_at"] = _ist_now().isoformat(timespec="seconds")
+        ACTIVE_OPTIONS_PATH.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        logger.info("Active position marked closed -> {}", ACTIVE_OPTIONS_PATH)
+    except Exception as exc:
+        logger.warning("Could not close active position file: {}", exc)
 
 
 def show_journal() -> None:
