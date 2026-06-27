@@ -209,10 +209,9 @@ def write_active_position(
         "contracts":    contracts,
     }
 
-    ACTIVE_OPTIONS_PATH.write_text(
-        json.dumps(payload, indent=2, default=str),
-        encoding="utf-8",
-    )
+    _tmp = ACTIVE_OPTIONS_PATH.with_suffix(".tmp")
+    _tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    _tmp.replace(ACTIVE_OPTIONS_PATH)
     logger.info(
         "Active position written -> {} | ATM={} expiry={} ids={}",
         ACTIVE_OPTIONS_PATH,
