@@ -199,6 +199,7 @@ def write_active_position(
         contracts.append({**c, "entry_ltp": entry_ltp})
 
     payload = {
+        "strategy_name": "nifty_weekly_theta",
         "status":       "open",
         "updated_at":   _ist_now().isoformat(timespec="seconds"),
         "entry_date":   str(entry_date),
