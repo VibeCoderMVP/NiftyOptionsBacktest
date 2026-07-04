@@ -234,12 +234,16 @@ def cmd_paper_entry(extra_args: list[str], entry_date_str: str | None = None) ->
             console.print(f"[red]Invalid --entry-date '{entry_date_str}'. Use YYYY-MM-DD.[/red]")
             sys.exit(1)
 
-    log_entry(
-        atm        = sig["atm"],
-        legs_ltps  = leg_ltps,
-        entry_spot = spot,
-        entry_date = entry_date,
-    )
+    try:
+        log_entry(
+            atm        = sig["atm"],
+            legs_ltps  = leg_ltps,
+            entry_spot = spot,
+            entry_date = entry_date,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(1)
 
 
 def _get_open_record() -> dict | None:
@@ -383,7 +387,11 @@ def cmd_paper_exit(extra_args: list[str]) -> None:
         console.print("[red]All values must be numbers.[/red]")
         sys.exit(1)
 
-    log_exit(exit_ltps)
+    try:
+        log_exit(exit_ltps)
+    except (ValueError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(1)
 
 
 def cmd_paper_show() -> None:

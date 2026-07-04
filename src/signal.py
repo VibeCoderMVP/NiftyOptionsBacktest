@@ -82,6 +82,48 @@ def get_nifty_spot() -> float | None:
         return None
 
 
+def get_nifty_open() -> float | None:
+    """
+    Fetch today's Nifty 50 session open via Dhan POST /marketfeed/ohlc.
+
+    Used by the scheduler's pre-entry dry-run preview (day's open, not current LTP, so the
+    preview reflects "if we'd entered at today's open" rather than a moment-to-moment price).
+    Response shape assumed (Dhan v2, same envelope as /marketfeed/ltp but with an extra "ohlc"
+    dict): {"data": {"IDX_I": {"13": {"ohlc": {"open": ..., "high": ..., "low": ..., "close": ...},
+    "last_price": ...}}}} — NOT yet verified against a live response; if this ever returns None
+    unexpectedly, log the raw payload and check Dhan's actual field name for open here first.
+    Returns None on any failure — caller should fall back to get_nifty_spot().
+    """
+    headers = {
+        "access-token": settings.dhan_access_token.get_secret_value(),
+        "client-id":    settings.dhan_client_id,
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = httpx.post(
+            f"{DHAN_API_BASE}/marketfeed/ohlc",
+            json={"IDX_I": ["13"]},
+            headers=headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        open_px = (
+            data.get("data", {})
+                .get("IDX_I", {})
+                .get("13", {})
+                .get("ohlc", {})
+                .get("open")
+        )
+        if open_px is not None:
+            return float(open_px)
+        logger.warning("OHLC 'open' field not found in response: {}", str(data)[:300])
+        return None
+    except Exception as exc:
+        logger.warning("get_nifty_open failed: {}", exc)
+        return None
+
+
 def compute_atm(spot: float) -> int:
     return int(round(spot / 50) * 50)
 

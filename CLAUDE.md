@@ -84,15 +84,58 @@ WEEKLY_BACKFILL.bat — fetch + build + backtest; cross-checks paper trade P&L v
 
 ---
 
-## Auto-Pilot via EasyTerminal
+## Auto-Pilot: scheduler.py (standalone, fixed 2026-07-05)
 
-EasyTerminal (`D:\Trading\EasyTerminal\`) runs the weekly cycle automatically:
+`scheduler.py` runs the weekly cycle automatically, **independent of EasyTerminal being
+open**. Run it continuously (`START_SCHEDULER.bat`), same as any other always-on service
+in this codebase (TW's P1/P2/P3, each strategy's monitor.py):
 
-- **Auto-entry:** Thursday 15:20 IST → runs `pipeline.py signal` subprocess → waits for 6 ZMQ LTPs → calls log_entry()
-- **Auto-exit:** Tuesday 15:25 IST (expiry day only) → uses current live LTPs → calls log_exit()
-- **Force-close:** Press `C` on ET Options tab → modal confirmation → closes at live LTPs
+- **Auto-entry:** configured weekday (default Thursday) at/after `entry_time_ist` (default
+  15:20), no open position → calls `run_signal(force=True)` in-process (no subprocess —
+  same venv) → subscribes to ZMQ port 5555/5557 itself and waits (up to 6 min) for all 6
+  leg LTPs → `paper_trade.log_entry()` → sends a **new** Telegram message with the confirmed
+  total premium collected (previously missing — the order-slip alert from `run_signal()`
+  only has the *proposed* legs, not the actual fill premiums).
+- **Auto-exit:** position open, `expiry_date == today`, at/after `exit_time_ist` (default
+  15:25) → same LTP wait (shorter timeout — legs have been ticking all week) →
+  `paper_trade.log_exit()` → Telegram exit summary (entry/exit premium, net P&L). A leg with
+  no LTP by the deadline falls back to Rs 0.05 (matches ET's own force-close convention).
+- **Force-close:** still available via ET's Options tab (`C` key) for a manual early exit —
+  unaffected by this change, still lives in `options_panel.py`/`options_journal_writer.py`.
+- **Terminal-only premium heartbeat (added 2026-07-05):** every 5 min
+  (`_PREVIEW_HEARTBEAT_INTERVAL_S`), prints a "still alive and can actually price this" signal
+  — distinct from `scheduler_heartbeat.json`, which only proves the process is up, not that
+  spot-fetch/ATM/security-ID-resolution/premium-fetch are still working end-to-end:
+  - **While flat** (no open position — gated on position state, not a hardcoded weekday
+    window, so it self-corrects for any flat stretch: normally Wed through Thu pre-15:20
+    since exit is Tuesday, but equally covers Mon/Tue too if an entry was ever missed, e.g.
+    the 2026-07-02 incident this whole file exists because of): once/day
+    (`_refresh_daily_preview`), fetches that day's Nifty **session open** via the new
+    `get_nifty_open()` (Dhan `/marketfeed/ohlc`, not `/marketfeed/ltp` — see its docstring,
+    the exact response field is unverified against a live call yet), computes the would-be
+    ATM-50/ATM/ATM+50 3L straddle, resolves its 6 legs, then re-prices and reprints the
+    cumulative premium every cycle. Purely a dry run — **never** writes
+    active_options_position.json/options_journal.jsonl, never sends Telegram.
+    Skips Sat/Sun (`today.weekday() >= 5`) so a market-closed fetch failure doesn't
+    retry-storm every 30s all weekend — added 2026-07-05 after noticing the gap.
+  - **While a position is open** (Thu 15:25 through Tue 15:25): same cadence, but prints the
+    real position's current cumulative premium instead (one-shot REST fetch via
+    `_fetch_option_ltps_once`, not the ZMQ collector — simpler and independent of whether
+    ticks are flowing at that exact moment). Still terminal-only; the actual exit still goes
+    through `_try_auto_exit` above.
 
-Config: `D:\Trading\options_config.json`
+Config: `D:\Trading\options_config.json`. Writes `data/scheduler_heartbeat.json` (ET Services
+tab row "Options Scheduler") and `data/scheduler.log`.
+
+### Why this moved out of EasyTerminal (2026-07-05 incident)
+
+The trigger used to be a 30-second Textual timer inside ET's `app.py`
+(`_check_options_schedule`) — which only ever runs while ET's TUI is actually open. On
+Thursday 2026-07-02, ET wasn't open at 15:20, so nothing fired: `active_options_position.json`
+and `options_ltp_cache.json` both sat frozen at the prior cycle's 2026-06-30 exit with zero
+activity for the rest of that week, and the cycle was silently skipped (no Telegram warning,
+no log — just nothing happened). Moving the trigger to its own always-on process closes that
+gap the same way every other strategy in this codebase already avoids it.
 
 ---
 
@@ -107,11 +150,13 @@ NiftyOptionsBacktest/
 ├── .env                      # DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN (never commit)
 ├── analyse_trades.py         # Per-leg analysis of historical trades (exit data inference)
 ├── options_ltp_service.py    # Standalone REST polling LTP service (ZMQ port 5557 fallback)
-├── SIGNAL.bat                # Thursday: compute ATM + order slip
-├── ENTRY.bat                 # Thursday: log entry LTPs after fills
-├── EXIT.bat                  # Tuesday: log exit LTPs after buyback
+├── scheduler.py              # Standalone auto-pilot (added 2026-07-05) — see "Auto-Pilot" above
+├── SIGNAL.bat                # Thursday: compute ATM + order slip (manual/backup path)
+├── ENTRY.bat                 # Thursday: log entry LTPs after fills (manual/backup path)
+├── EXIT.bat                  # Tuesday: log exit LTPs after buyback (manual/backup path)
 ├── WEEKLY_BACKFILL.bat       # Tuesday: update historical DB
 ├── START_OPTIONS_LTP.bat     # Start REST fallback LTP polling service
+├── START_SCHEDULER.bat       # Start the standalone auto-pilot scheduler — keep running always
 ├── src/
 │   ├── config.py             # All constants + Settings (pydantic-settings from .env)
 │   ├── fetcher.py            # Dhan API calls + disk caching
@@ -126,6 +171,8 @@ NiftyOptionsBacktest/
     ├── options/weekly/        # Per-cycle parquet files (gitignored — regenerate with build)
     ├── options_journal.jsonl  # Paper trade log (entry/exit records, OPEN = outcome:null)
     ├── .last_signal.json      # Written by signal; read by paper-entry for ATM
+    ├── scheduler_heartbeat.json  # scheduler.py health beacon — ET Services tab row
+    ├── scheduler.log          # scheduler.py rotating log (5MB/14 days)
     ├── dhan_instruments.csv   # Instruments master (refreshed every 20h)
     ├── backtest_results.parquet
     ├── backtest_summary_pre_sep2025_2day.csv
@@ -143,8 +190,8 @@ Written at `D:\Trading\active_options_position.json`. Shared between this repo, 
 {
   "status": "open",
   "updated_at": "2026-06-26T15:21:00",
-  "entry_date": "2026-06-25",
-  "expiry_date": "2026-06-30",
+  "entry_date": "2026-06-26",
+  "expiry_date": "2026-07-01",
   "atm": 24050,
   "entry_spot": 24046.25,
   "contracts": [
@@ -239,7 +286,7 @@ Brokerage: Rs 20/leg/side × 6 legs × 2 sides = Rs 240/trade.
 
 **Rolling data coverage gap:** When Nifty moves >200 pts during the week, entry strikes fall outside the ATM±4 relative range on exit day → exit LTP is absent. `analyse_trades.py` infers intrinsic value (`max(exit_spot - strike, 0.05)` for CE) from the exit-day spot price. These are marked with `*`.
 
-**Jun 30 parquet doesn't exist yet:** Until Tuesday Jun 30 close, `pipeline.py build` returns 0 cycles for that expiry. Run WEEKLY_BACKFILL.bat after Tuesday's close.
+**After expiry Tuesday:** Run WEEKLY_BACKFILL.bat after Tuesday (expiry day) 15:30 close to fetch + build + backtest the just-completed cycle. The parquet for the current expiry week does not exist until that run completes.
 
 ---
 

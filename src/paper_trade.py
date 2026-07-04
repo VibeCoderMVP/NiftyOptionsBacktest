@@ -77,7 +77,7 @@ def log_entry(
     entry_date: date | None = None,
     lots: int = 1,
     regime: str = "tue_expiry",
-) -> None:
+) -> dict:
     """
     Log a new paper trade entry.
 
@@ -85,8 +85,7 @@ def log_entry(
       [ATM-50 CE, ATM-50 PE, ATM CE, ATM PE, ATM+50 CE, ATM+50 PE]
     """
     if len(legs_ltps) != 6:
-        console.print(f"[red]Expected 6 LTP values, got {len(legs_ltps)}.[/red]")
-        return
+        raise ValueError(f"Expected 6 LTP values, got {len(legs_ltps)}")
 
     entry_date  = entry_date or _ist_now().date()
     expiry_date = _next_tuesday(entry_date)
@@ -150,15 +149,15 @@ def log_entry(
         "Paper entry | ATM={} expiry={} premium_pts={:.2f} Rs_collected={:.0f}",
         atm, expiry_date, total_entry, rs_collected,
     )
+    return record
 
 
-def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> None:
+def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> dict:
     """
     Close the last open paper trade with exit LTPs (same order as entry).
     """
     if len(exit_ltps) != 6:
-        console.print(f"[red]Expected 6 exit LTP values, got {len(exit_ltps)}.[/red]")
-        return
+        raise ValueError(f"Expected 6 exit LTP values, got {len(exit_ltps)}")
 
     records = _load_journal()
     open_idx = next(
@@ -166,8 +165,7 @@ def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> None:
         None,
     )
     if open_idx is None:
-        console.print("[red]No open paper trade found. Log an entry first.[/red]")
-        return
+        raise RuntimeError("No open paper trade found. Log an entry first.")
 
     rec      = records[open_idx]
     exit_t   = exit_time or _ist_now().strftime("%Y-%m-%d %H:%M")
@@ -210,6 +208,7 @@ def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> None:
         "Paper exit | outcome={} net_pnl_rs={:.0f} pnl_pts={:.2f}",
         rec["outcome"], net_pnl_rs, pnl_pts,
     )
+    return rec
 
 
 def _update_active_position_ltps(entry_ltps: list[float]) -> None:
