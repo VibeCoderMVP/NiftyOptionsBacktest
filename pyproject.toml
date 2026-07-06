@@ -14,7 +14,11 @@ dependencies = [
     "rich>=13.0",
     "truststore>=0.9",
     "pyzmq>=25.0",
+    "trading-core",
 ]
 
 [tool.uv]
+
+[tool.uv.sources]
+trading-core = { path = "../trading_core", editable = true }
 # uv sync to set up; uv run python pipeline.py <command>

@@ -10,7 +10,6 @@ Saves last signal to data/.last_signal.json for use by paper-entry command.
 from __future__ import annotations
 
 import json
-import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -176,31 +175,18 @@ def format_signal_message(
     return "\n".join(lines)
 
 
-def _post_telegram(message: str) -> None:
-    """Actual network call -- runs on a background thread, see send_telegram()."""
-    token   = settings.telegram_bot_token
-    chat_id = settings.telegram_chat_id
-    if not token or not chat_id:
-        logger.warning("Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set in .env)")
-        return
-    try:
-        resp = httpx.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        logger.info("Telegram alert sent to chat {}", chat_id)
-    except Exception as exc:
-        logger.warning("Telegram send failed: {}", exc)
-
-
 def send_telegram(message: str) -> None:
-    """Queue message to Telegram (fire-and-forget, non-blocking) -- consistent
-    with trading_core.alerts.AlertClient.send_async() used elsewhere in this
-    codebase, even though this project's own call sites are low-frequency
-    (weekly entry/exit), not a per-symbol loop."""
-    threading.Thread(target=_post_telegram, args=(message,), daemon=True).start()
+    """Queue message for trading_core's shared alert dispatcher (added 2026-07-06)
+    -- same bot/chat as every other strategy (Telegram has no one-bot-per-project
+    restriction), handled by a single independent dispatcher process instead of
+    this project's own httpx call + its own (previously unconfigured) .env
+    credentials. See trading_core/alert_outbox.py's module docstring for the
+    full rationale (transactional outbox pattern)."""
+    from trading_core.alert_outbox import AlertOutbox
+    try:
+        AlertOutbox().enqueue("NiftyOptionsBacktest", message)
+    except Exception as exc:
+        logger.warning("Telegram enqueue failed: {}", exc)
 
 
 def save_last_signal(entry_date: date, expiry_date: date, spot: float, atm: int) -> None:

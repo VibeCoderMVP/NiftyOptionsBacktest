@@ -230,6 +230,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "pyzmq" },
     { name = "rich" },
+    { name = "trading-core" },
     { name = "truststore" },
 ]
 
@@ -244,6 +245,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyzmq", specifier = ">=25.0" },
     { name = "rich", specifier = ">=13.0" },
+    { name = "trading-core", editable = "../trading_core" },
     { name = "truststore", specifier = ">=0.9" },
 ]
 
@@ -600,6 +602,29 @@ sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
 ]
+
+[[package]]
+name = "trading-core"
+version = "0.1.0"
+source = { editable = "../trading_core" }
+dependencies = [
+    { name = "httpx" },
+    { name = "loguru" },
+    { name = "python-dotenv" },
+    { name = "truststore" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "duckdb", marker = "extra == 'data'", specifier = ">=1.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "loguru", specifier = ">=0.7" },
+    { name = "pandas", marker = "extra == 'data'", specifier = ">=2.0" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pyzmq", marker = "extra == 'zmq'", specifier = ">=25" },
+    { name = "truststore", specifier = ">=0.9" },
+]
+provides-extras = ["zmq", "data"]
 
 [[package]]
 name = "truststore"
