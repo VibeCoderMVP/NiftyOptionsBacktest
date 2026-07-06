@@ -196,6 +196,9 @@ class LtpCollector:
             sub.close()
             ctx.term()
 
+    def stop(self) -> None:
+        self._stop.set()
+
     def get(self, key: tuple[int, str]) -> float | None:
         with self._lock:
             return self._ltps.get(key)
