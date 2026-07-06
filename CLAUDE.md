@@ -127,6 +127,18 @@ in this codebase (TW's P1/P2/P3, each strategy's monitor.py):
 Config: `D:\Trading\options_config.json`. Writes `data/scheduler_heartbeat.json` (ET Services
 tab row "Options Scheduler") and `data/scheduler.log`.
 
+**`_ist_now()` must return a naive datetime — fixed 2026-07-06.** It computes the correct IST
+wall-clock value via `datetime.now(timezone.utc) + _IST`, but that expression keeps
+`tzinfo=utc` on a value that's actually ~5.5h ahead of true UTC. ET's `_age_seconds()` branches
+on whether the parsed timestamp has `tzinfo`: if so, it computes `datetime.now(timezone.utc) -
+dt`, which went **negative** here (a "future" timestamp) — and a negative age is trivially
+"fresh," so the Services tab showed the Options Scheduler as `OK`/GREEN for hours after it had
+actually crashed (the `LtpCollector.stop()` `AttributeError`, same day). Fixed by stripping
+`tzinfo` before returning, matching every other service's naive-local-IST heartbeat convention
+in this codebase (see `TradingWebSockets/CLAUDE.md`'s `_age_seconds()` gotcha for the general
+rule). If a future service's heartbeat ever shows GREEN when it shouldn't, check whether its
+timestamp is tz-aware and whether that tag is actually correct before trusting the display.
+
 ### Why this moved out of EasyTerminal (2026-07-05 incident)
 
 The trigger used to be a 30-second Textual timer inside ET's `app.py`
