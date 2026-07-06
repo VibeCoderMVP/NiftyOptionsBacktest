@@ -10,6 +10,7 @@ Saves last signal to data/.last_signal.json for use by paper-entry command.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -175,7 +176,8 @@ def format_signal_message(
     return "\n".join(lines)
 
 
-def send_telegram(message: str) -> None:
+def _post_telegram(message: str) -> None:
+    """Actual network call -- runs on a background thread, see send_telegram()."""
     token   = settings.telegram_bot_token
     chat_id = settings.telegram_chat_id
     if not token or not chat_id:
@@ -191,6 +193,14 @@ def send_telegram(message: str) -> None:
         logger.info("Telegram alert sent to chat {}", chat_id)
     except Exception as exc:
         logger.warning("Telegram send failed: {}", exc)
+
+
+def send_telegram(message: str) -> None:
+    """Queue message to Telegram (fire-and-forget, non-blocking) -- consistent
+    with trading_core.alerts.AlertClient.send_async() used elsewhere in this
+    codebase, even though this project's own call sites are low-frequency
+    (weekly entry/exit), not a per-symbol loop."""
+    threading.Thread(target=_post_telegram, args=(message,), daemon=True).start()
 
 
 def save_last_signal(entry_date: date, expiry_date: date, spot: float, atm: int) -> None:
