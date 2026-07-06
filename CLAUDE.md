@@ -279,6 +279,7 @@ Brokerage: Rs 20/leg/side × 6 legs × 2 sides = Rs 240/trade.
 - `expiryCode=0` is falsy — API rejects it with "expiryCode is required". Use `1`.
 - No top-level `"status"` field in response — check `resp["data"]["ce"] is not None`
 - `data["pe"]` is `None` (not dict) when `drvOptionType="CALL"` — both sides are NOT returned together
+- **`POST /marketfeed/ltp` and `POST /marketfeed/ohlc` require security IDs as `int`, not `str`, in the request list** — found 2026-07-06. `{"IDX_I": ["13"]}` → `400 {"data":{"814":"Invalid Request"},"status":"failed"}`; `{"IDX_I": [13]}` → `200 success`. This is the opposite convention from `POST /charts/rollingoption` (used by `fetcher.py`), which wants `NIFTY_SECURITY_ID` as the string `"13"` — don't "fix" one to match the other, they're genuinely different endpoints with different expectations. Bit `get_nifty_spot()`/`get_nifty_open()` (`src/signal.py`) and `_fetch_option_ltps_once()` (`scheduler.py`), both fixed to cast to `int(...)` only in the request payload (dict keys/lookups elsewhere stay as strings, matching what the response actually returns).
 
 **Windows SSL:** `truststore.inject_into_ssl()` called at fetcher + signal module load. Required for Dhan's cert chain on Windows. Do not remove.
 
@@ -313,9 +314,21 @@ Install: `uv sync --system-certs` (--system-certs required on Windows for PyPI S
 ```
 DHAN_CLIENT_ID=your_client_id
 DHAN_ACCESS_TOKEN=your_token
+DHAN_PIN=your_pin                   # required for TOTP auto-renewal (see below)
+DHAN_TOTP_SECRET=your_totp_secret   # required for TOTP auto-renewal (see below)
 TELEGRAM_BOT_TOKEN=your_bot_token   # optional — for signal alerts
 TELEGRAM_CHAT_ID=your_chat_id       # optional
 ```
+
+**Token auto-renewal (fixed 2026-07-06):** `D:\Trading\renew_token.py`'s daily 08:50 auto-renewal
+only ever wrote `DHAN_ACCESS_TOKEN` to `TradingWebSockets\.env` and `TradingCommodities\.env` —
+this project's `.env` was never in that list, so its token silently went stale (found live
+2026-07-06: `scheduler.py` was failing every Dhan call with `401 Unauthorized` off a token that
+had expired ~10 days earlier, while TW's own token was fine). Fixed by adding
+`D:\Trading\NiftyOptionsBacktest\.env` to `renew_token.py`'s `ENV_FILES` list — this project's
+token is now kept current by the same daily auto-renewal as TW's. If a 401 shows up again on
+any Dhan call from this project, check `renew_token.py`'s `ENV_FILES` list hasn't regressed
+before assuming it's a credentials problem.
 
 ## GitHub
 

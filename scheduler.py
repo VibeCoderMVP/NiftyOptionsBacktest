@@ -127,7 +127,7 @@ def _fetch_option_ltps_once(security_ids: list[str]) -> dict[str, float]:
     try:
         resp = httpx.post(
             f"{DHAN_API_BASE}/marketfeed/ltp",
-            json={"NSE_FNO": security_ids},
+            json={"NSE_FNO": [int(sid) for sid in security_ids]},
             headers=headers,
             timeout=10,
         )

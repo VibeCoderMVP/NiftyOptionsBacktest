@@ -19,7 +19,7 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
-from src.config import DHAN_API_BASE, NIFTY_LOT_SIZE, settings
+from src.config import DHAN_API_BASE, NIFTY_LOT_SIZE, NIFTY_SECURITY_ID, settings
 
 ACTIVE_OPTIONS_PATH = Path(r"D:\Trading\active_options_position.json")
 
@@ -60,7 +60,7 @@ def get_nifty_spot() -> float | None:
     try:
         resp = httpx.post(
             f"{DHAN_API_BASE}/marketfeed/ltp",
-            json={"IDX_I": ["13"]},
+            json={"IDX_I": [int(NIFTY_SECURITY_ID)]},
             headers=headers,
             timeout=10,
         )
@@ -102,7 +102,7 @@ def get_nifty_open() -> float | None:
     try:
         resp = httpx.post(
             f"{DHAN_API_BASE}/marketfeed/ohlc",
-            json={"IDX_I": ["13"]},
+            json={"IDX_I": [int(NIFTY_SECURITY_ID)]},
             headers=headers,
             timeout=10,
         )
