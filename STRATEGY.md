@@ -563,4 +563,4 @@ The edge is statistical. It requires running this consistently for months, not c
 ---
 
 *Document generated from NiftyOptionsBacktest pipeline | Data: Dhan API | Storage: DuckDB + Parquet*  
-*Last updated: 2026-06-27 | Backtest range: 2023-01-01 to 2026-06-26 | Phase 2 automation live*
+*Last updated: 2026-06-30 | Backtest range: 2023-01-01 to 2026-06-26 | Phase 2 automation live | P2 WebSocket first live day 2026-06-30*

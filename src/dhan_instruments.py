@@ -91,17 +91,19 @@ def resolve_option_ids(
                 return c
         return None
 
-    col_exch   = _col(["SEM_EXM_EXCH_ID", "EXCHANGE", "exchange"])
-    col_secid  = _col(["SEM_SMST_SECURITY_ID", "SECURITY_ID", "security_id"])
-    col_expiry = _col(["SEM_EXPIRY_DATE", "EXPIRY_DATE", "expiry_date"])
-    col_strike = _col(["SEM_STRIKE_PRICE", "STRIKE_PRICE", "strike_price"])
-    col_type   = _col(["SEM_OPTION_TYPE", "OPTION_TYPE", "option_type"])
-    col_name   = _col(["SM_SYMBOL_NAME", "SYMBOL_NAME", "symbol_name", "SEM_TRADING_SYMBOL"])
+    col_exch    = _col(["SEM_EXM_EXCH_ID", "EXCHANGE", "exchange"])
+    col_segment = _col(["SEM_SEGMENT", "SEGMENT", "segment"])
+    col_instr   = _col(["SEM_INSTRUMENT_NAME", "INSTRUMENT_NAME"])
+    col_secid   = _col(["SEM_SMST_SECURITY_ID", "SECURITY_ID", "security_id"])
+    col_expiry  = _col(["SEM_EXPIRY_DATE", "EXPIRY_DATE", "expiry_date"])
+    col_strike  = _col(["SEM_STRIKE_PRICE", "STRIKE_PRICE", "strike_price"])
+    col_type    = _col(["SEM_OPTION_TYPE", "OPTION_TYPE", "option_type"])
+    col_symbol  = _col(["SEM_TRADING_SYMBOL", "SM_SYMBOL_NAME", "SYMBOL_NAME", "symbol_name"])
 
     missing = [n for n, c in [
         ("exchange", col_exch), ("security_id", col_secid),
         ("expiry_date", col_expiry), ("strike", col_strike),
-        ("option_type", col_type), ("symbol_name", col_name),
+        ("option_type", col_type), ("symbol", col_symbol),
     ] if c is None]
     if missing:
         raise RuntimeError(
@@ -109,13 +111,23 @@ def resolve_option_ids(
             f"Found columns: {list(df.columns[:20])}"
         )
 
-    # Filter: NSE_FNO + NIFTY underlying
-    fno = df[df[col_exch] == "NSE_FNO"].copy()
-    nifty = fno[fno[col_name].astype(str).str.upper() == underlying.upper()].copy()
+    # Dhan instruments CSV uses SEM_EXM_EXCH_ID="NSE" with SEM_SEGMENT="D" for
+    # derivatives (not "NSE_FNO" — that string is only used in WS subscription tuples).
+    # Symbol format: "NIFTY-Jun2026-24000-CE" in SEM_TRADING_SYMBOL.
+    nse = df[df[col_exch].astype(str) == "NSE"]
+
+    if col_segment and "D" in nse[col_segment].values:
+        fno = nse[nse[col_segment] == "D"]
+    elif col_instr is not None:
+        fno = nse[nse[col_instr].astype(str).str.contains("OPT", case=False, na=False)]
+    else:
+        fno = nse
+
+    nifty = fno[fno[col_symbol].astype(str).str.upper().str.startswith(underlying.upper() + "-")].copy()
 
     if nifty.empty:
         raise RuntimeError(
-            f"No NSE_FNO {underlying} rows found in instruments master. "
+            f"No NSE F&O {underlying} option rows found in instruments master. "
             f"Check the CSV is current."
         )
 
@@ -123,14 +135,12 @@ def resolve_option_ids(
     expiry_str = expiry_date.strftime("%Y-%m-%d")
 
     def _try_parse_expiry(s: str) -> str:
-        """Return YYYY-MM-DD regardless of input format."""
-        s = str(s).strip()
-        for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d/%m/%Y", "%m/%d/%Y"):
-            try:
-                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
-            except ValueError:
-                continue
-        return s  # leave as-is if we can't parse
+        """Return YYYY-MM-DD regardless of input format (handles time components too)."""
+        try:
+            import pandas as _pd
+            return _pd.to_datetime(str(s).strip()).strftime("%Y-%m-%d")
+        except Exception:
+            return str(s).strip()[:10]  # fallback: take first 10 chars
 
     nifty = nifty.copy()
     nifty["_expiry_norm"] = nifty[col_expiry].astype(str).apply(_try_parse_expiry)
