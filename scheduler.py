@@ -92,7 +92,17 @@ _PREVIEW_HEARTBEAT_INTERVAL_S = 300   # 5 min — terminal-only premium heartbea
 
 
 def _ist_now() -> datetime:
-    return datetime.now(timezone.utc) + _IST
+    """Correct IST wall-clock VALUE, but must return it as a NAIVE datetime --
+    every other service's heartbeat in this codebase writes naive local-IST
+    timestamps (see TradingWebSockets/CLAUDE.md's _age_seconds() gotcha), and
+    ET's own _age_seconds() branches on tzinfo: if present, it does
+    `datetime.now(timezone.utc) - dt`, which silently went NEGATIVE here
+    (found live 2026-07-06) since `datetime.now(timezone.utc) + _IST` keeps
+    tzinfo=utc on a value that's actually ~5.5h ahead of real UTC -- ET read
+    that negative age as "very fresh" and showed OK/GREEN even though the
+    process had been dead for hours. Stripping tzinfo makes ET take the
+    naive-local branch instead, comparing IST-to-IST correctly."""
+    return (datetime.now(timezone.utc) + _IST).replace(tzinfo=None)
 
 
 def _read_cfg() -> dict:
