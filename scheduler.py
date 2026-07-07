@@ -60,8 +60,6 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-import httpx
-
 _PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_PROJECT_DIR))
 
@@ -69,12 +67,12 @@ import zmq
 from loguru import logger
 
 from src import paper_trade
-from src.config import DHAN_API_BASE, settings
 from src.dhan_instruments import resolve_option_ids
 from src.signal import (
     ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, get_nifty_open,
     get_nifty_spot, next_expiry_tuesday, run_signal, send_telegram,
 )
+from trading_core.subscription_registry import request_subscription
 
 _IST = timedelta(hours=5, minutes=30)
 _CONFIG_PATH   = Path(r"D:\Trading\options_config.json")
@@ -89,6 +87,10 @@ _ENTRY_LTP_TIMEOUT_S = 360   # 6 min — fresh legs, tick_service needs time to 
 _EXIT_LTP_TIMEOUT_S  = 120   # 2 min — legs have been ticking all week already
 _LTP_POLL_INTERVAL_S = 10
 _PREVIEW_HEARTBEAT_INTERVAL_S = 300   # 5 min — terminal-only premium heartbeat cadence
+_PREVIEW_RETRY_COOLDOWN_S = 300   # 5 min — throttle retries after a failed daily-preview fetch;
+                                  # without this, a single failure retried every 30s main-loop
+                                  # tick all day, hammering Dhan's LTP/OHLC endpoints and
+                                  # plausibly contributing to the 429 rate-limit seen 2026-07-07
 
 
 def _ist_now() -> datetime:
@@ -119,40 +121,6 @@ def _read_active_position() -> dict | None:
         return json.loads(ACTIVE_OPTIONS_PATH.read_text(encoding="utf-8"))
     except Exception:
         return None
-
-
-def _fetch_option_ltps_once(security_ids: list[str]) -> dict[str, float]:
-    """One-shot REST fetch of current LTPs for arbitrary NSE_FNO security IDs.
-
-    Used for the pre-entry dry-run preview, where the legs aren't part of any real
-    position yet, so tick_service has no reason to auto-subscribe them over ZMQ.
-    Same endpoint/shape as options_ltp_service.py's _fetch_ltps — kept as a separate,
-    smaller one-shot helper here rather than importing that long-running service.
-    """
-    headers = {
-        "access-token": settings.dhan_access_token.get_secret_value(),
-        "client-id":    settings.dhan_client_id,
-        "Content-Type": "application/json",
-    }
-    try:
-        resp = httpx.post(
-            f"{DHAN_API_BASE}/marketfeed/ltp",
-            json={"NSE_FNO": [int(sid) for sid in security_ids]},
-            headers=headers,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        fno_data = data.get("data", {}).get("NSE_FNO", {})
-        result = {}
-        for sid, entry in fno_data.items():
-            ltp = entry.get("last_price") or entry.get("LTP")
-            if ltp is not None:
-                result[str(sid)] = float(ltp)
-        return result
-    except Exception as exc:
-        logger.warning("Dry-run LTP fetch failed: {}", exc)
-        return {}
 
 
 def _write_heartbeat(started_at: str) -> None:
@@ -227,6 +195,69 @@ class LtpCollector:
         return [self.get(k) for k in keys]
 
 
+class NiftySpotCollector:
+    """Background ZMQ SUB thread tracking the live NIFTY index tick (topic b"NIFTY",
+    published by TW's tick_service.py — added 2026-07-07). Replaces this file's prior
+    direct REST calls to Dhan's /marketfeed/ltp|ohlc for Nifty spot/open: those calls
+    ran on their own independent polling loop with no backoff on failure, contributing
+    to (and repeatedly re-triggering) a 429 rate-limit seen 2026-07-06/07. Reusing
+    tick_service's already-open, already-authenticated WebSocket connection means no
+    additional Dhan API call is made for this purpose at all.
+
+    Tracks the first tick seen each IST day as a proxy for the session open — close
+    enough for this feature's actual purpose (a rough dry-run preview), not used for
+    anything that touches real money."""
+
+    def __init__(self) -> None:
+        self._ltp: float | None = None
+        self._session_open: float | None = None
+        self._today: date | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="nifty-spot-collector")
+        self._thread.start()
+
+    def _run(self) -> None:
+        ctx = zmq.Context()
+        sub = ctx.socket(zmq.SUB)
+        sub.setsockopt(zmq.LINGER, 0)
+        sub.connect(f"tcp://127.0.0.1:{_PRIMARY_PORT}")
+        sub.setsockopt(zmq.SUBSCRIBE, b"NIFTY")
+        try:
+            while not self._stop.is_set():
+                if not sub.poll(timeout=500):
+                    continue
+                try:
+                    _, raw = sub.recv_multipart(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    continue
+                try:
+                    data = json.loads(raw.decode())
+                    ltp = float(data["ltp"])
+                except (KeyError, ValueError, json.JSONDecodeError):
+                    continue
+                today = _ist_now().date()
+                with self._lock:
+                    if self._today != today:
+                        self._today = today
+                        self._session_open = ltp
+                    self._ltp = ltp
+        finally:
+            sub.close()
+            ctx.term()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def spot(self) -> float | None:
+        with self._lock:
+            return self._ltp
+
+    def session_open(self) -> float | None:
+        with self._lock:
+            return self._session_open
+
+
 class PreviewState:
     """Today's dry-run 3L straddle (computed once/day from the session open) while flat.
     Never written to disk/journal/Telegram — terminal-only, purely a liveness signal."""
@@ -237,26 +268,52 @@ class PreviewState:
         self.security_ids: list[str] = []               # same order as legs
         self.open_spot: float | None = None
         self.atm: int | None = None
+        self.last_attempt_mono: float | None = None    # throttle retries after a failure
 
 
-def _refresh_daily_preview(preview: PreviewState) -> None:
-    """Once per day, while flat: fetch today's Nifty open, compute the would-be 3L
+def _refresh_daily_preview(preview: PreviewState, nifty_spot: NiftySpotCollector) -> None:
+    """Once per day, while flat: get today's Nifty open, compute the would-be 3L
     straddle (ATM-50/ATM/ATM+50 x CE+PE) and resolve its security IDs, so the periodic
     heartbeat below has something concrete to re-price. Terminal-only — no side effects
-    on active_options_position.json / options_journal.jsonl / Telegram."""
+    on active_options_position.json / options_journal.jsonl / Telegram.
+
+    Prefers the live ZMQ NIFTY tick (nifty_spot, fed by TW's tick_service.py) over Dhan
+    REST — added 2026-07-07 after the REST-only version's own retry logic contributed
+    to a 429 rate-limit. REST is kept only as a fallback for when P2/ZMQ has no data yet
+    (e.g. this process started before P2, or P2 is down) — this file shouldn't have a
+    hard dependency on P2."""
     today = _ist_now().date()
     if preview.computed_date == today:
         return
     if today.weekday() >= 5:   # Sat/Sun — market shut, don't retry-storm a failing fetch all weekend
         return
 
-    open_px = get_nifty_open()
-    used_fallback = False
+    now_mono = time.monotonic()
+    if (
+        preview.last_attempt_mono is not None
+        and now_mono - preview.last_attempt_mono < _PREVIEW_RETRY_COOLDOWN_S
+    ):
+        return   # failed recently — don't hammer Dhan every 30s main-loop tick
+    preview.last_attempt_mono = now_mono
+
+    open_px = nifty_spot.session_open()
+    src = "zmq session open"
     if open_px is None:
-        open_px = get_nifty_spot()
-        used_fallback = True
+        open_px = nifty_spot.spot()
+        src = "zmq spot LTP (open unavailable)"
     if open_px is None:
-        logger.warning("DRY-RUN PREVIEW: could not fetch Nifty open or spot — retrying next cycle")
+        # ZMQ has nothing yet (P2 not up, or no tick received this session) — REST fallback
+        open_px = get_nifty_open()
+        src = "REST session open (zmq unavailable)"
+        if open_px is None:
+            open_px = get_nifty_spot()
+            src = "REST spot LTP (zmq + open unavailable)"
+    if open_px is None:
+        logger.warning(
+            "DRY-RUN PREVIEW: could not fetch Nifty open or spot from ZMQ or REST "
+            "— retrying in {}s",
+            _PREVIEW_RETRY_COOLDOWN_S,
+        )
         return
 
     atm = compute_atm(open_px)
@@ -274,26 +331,52 @@ def _refresh_daily_preview(preview: PreviewState) -> None:
     preview.legs          = [(int(c["strike"]), str(c["option_type"])) for c in resolved]
     preview.security_ids  = [str(c["security_id"]) for c in resolved]
 
-    src_label = "spot LTP (open unavailable)" if used_fallback else "session open"
+    # Subscribe these preview-only legs on P2's live feed via the generic dynamic-
+    # subscription registry (added 2026-07-07) — same OPT_{strike}_{type} topic
+    # convention real positions use, so the existing LtpCollector (already subscribed
+    # to that prefix) picks them up automatically. Previously these legs were fetched
+    # via REST (_fetch_option_ltps_once) on every heartbeat cycle since nothing ever
+    # subscribed them — fixed same day this was reported as still not working.
+    try:
+        request_subscription("nifty_options_preview", [
+            {
+                "exchange_segment": "NSE_FNO",
+                "security_id": str(c["security_id"]),
+                "topic": f"OPT_{c['strike']}_{c['option_type']}",
+                "strike": int(c["strike"]),
+                "option_type": str(c["option_type"]),
+            }
+            for c in resolved
+        ])
+    except Exception as exc:
+        logger.warning("DRY-RUN PREVIEW: could not request live subscription for legs: {}", exc)
+
     logger.info(
         "DRY-RUN PREVIEW: today's would-be straddle from {} {:.2f} -> ATM {} | legs: {}",
-        src_label, open_px, atm,
+        src, open_px, atm,
         ", ".join(f"{s}{t}" for s, t in preview.legs),
     )
 
 
-def _log_premium_heartbeat(preview: PreviewState) -> None:
+def _log_premium_heartbeat(preview: PreviewState, collector: LtpCollector) -> None:
     """Terminal-only periodic print — proof the pipeline can still fetch real premiums,
     not just that the process is running. Position legs take priority over the dry-run
-    preview whenever a real position is open."""
+    preview whenever a real position is open.
+
+    Reads both branches from `collector` (ZMQ, topic prefix OPT_) instead of REST — fixed
+    2026-07-07. The open-position branch previously called _fetch_option_ltps_once() (REST)
+    even though those exact legs are already flowing on ZMQ via the pre-existing
+    active_options_position.json auto-subscribe mechanism (the same feed _try_auto_entry/
+    _try_auto_exit already read via collector.wait_for()) — a pure redundant REST call for
+    data already on the wire. The preview branch now requests its legs via
+    trading_core.subscription_registry.request_subscription() (see _refresh_daily_preview)
+    using the same OPT_{strike}_{type} topic convention real positions use, so this same
+    collector picks them up automatically with no new subscriber needed."""
     pos = _read_active_position()
     if pos and pos.get("status") == "open":
         contracts = pos.get("contracts", [])
         expected  = [(int(c["strike"]), str(c["option_type"])) for c in contracts]
-        sec_ids   = [c["security_id"] for c in contracts if c.get("security_id")]
-        ltps      = _fetch_option_ltps_once(sec_ids) if sec_ids else {}
-        by_sid    = {c["security_id"]: (int(c["strike"]), str(c["option_type"])) for c in contracts}
-        premiums  = [ltps.get(sid) for sid in sec_ids]
+        premiums  = [collector.get(k) for k in expected]
         if premiums and all(v is not None for v in premiums):
             total = sum(premiums)
             logger.info(
@@ -306,11 +389,10 @@ def _log_premium_heartbeat(preview: PreviewState) -> None:
                         pos.get("atm"))
         return
 
-    if preview.computed_date != _ist_now().date() or not preview.security_ids:
+    if preview.computed_date != _ist_now().date() or not preview.legs:
         return  # no preview computed yet today (shouldn't normally happen — refreshed first)
 
-    ltps = _fetch_option_ltps_once(preview.security_ids)
-    premiums = [ltps.get(sid) for sid in preview.security_ids]
+    premiums = [collector.get(k) for k in preview.legs]
     if not premiums or any(v is None for v in premiums):
         logger.info("DRY-RUN HEARTBEAT: ATM {} — premium fetch incomplete this cycle", preview.atm)
         return
@@ -486,6 +568,25 @@ def main() -> None:
     logger.info("Options scheduler started")
 
     collector = LtpCollector()
+    nifty_spot = NiftySpotCollector()
+
+    # Give the ZMQ subscriber a real chance to receive its first NIFTY tick before
+    # anything tries to read it — fixed 2026-07-07. Without this, the very first
+    # _refresh_daily_preview() call fired within ~1-2s of process start, always found
+    # nifty_spot empty (regardless of how long P2 had already been running — the
+    # scheduler's OWN subscriber socket only starts this moment), and fell through to
+    # the REST fallback on literally every restart. This wait is capped so a genuinely
+    # down/unreachable P2 doesn't hang startup — REST fallback still runs after it.
+    _NIFTY_TICK_WAIT_S = 15
+    deadline = time.monotonic() + _NIFTY_TICK_WAIT_S
+    while nifty_spot.spot() is None and time.monotonic() < deadline:
+        time.sleep(0.5)
+    if nifty_spot.spot() is None:
+        logger.warning(
+            "No NIFTY tick received via ZMQ within {}s of startup — "
+            "first preview cycle will fall back to REST", _NIFTY_TICK_WAIT_S,
+        )
+
     fired: dict[str, date] = {}
     preview = PreviewState()
     last_hb = time.monotonic()
@@ -500,11 +601,11 @@ def main() -> None:
 
             pos = _read_active_position()
             if not (pos and pos.get("status") == "open"):
-                _refresh_daily_preview(preview)
+                _refresh_daily_preview(preview, nifty_spot)
 
             now_mono = time.monotonic()
             if now_mono - last_preview_hb >= _PREVIEW_HEARTBEAT_INTERVAL_S:
-                _log_premium_heartbeat(preview)
+                _log_premium_heartbeat(preview, collector)
                 last_preview_hb = now_mono
 
             if now_mono - last_hb >= _HEARTBEAT_INTERVAL:
@@ -516,6 +617,7 @@ def main() -> None:
         pass
     finally:
         collector.stop()
+        nifty_spot.stop()
         logger.info("Options scheduler stopped")
 
 

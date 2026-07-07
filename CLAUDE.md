@@ -102,27 +102,58 @@ in this codebase (TW's P1/P2/P3, each strategy's monitor.py):
   no LTP by the deadline falls back to Rs 0.05 (matches ET's own force-close convention).
 - **Force-close:** still available via ET's Options tab (`C` key) for a manual early exit —
   unaffected by this change, still lives in `options_panel.py`/`options_journal_writer.py`.
-- **Terminal-only premium heartbeat (added 2026-07-05):** every 5 min
-  (`_PREVIEW_HEARTBEAT_INTERVAL_S`), prints a "still alive and can actually price this" signal
-  — distinct from `scheduler_heartbeat.json`, which only proves the process is up, not that
-  spot-fetch/ATM/security-ID-resolution/premium-fetch are still working end-to-end:
+- **Terminal-only premium heartbeat:** every 5 min (`_PREVIEW_HEARTBEAT_INTERVAL_S`), prints
+  a "still alive and can actually price this" signal — distinct from `scheduler_heartbeat.json`,
+  which only proves the process is up, not that spot-fetch/ATM/security-ID-resolution/
+  premium-fetch are still working end-to-end:
   - **While flat** (no open position — gated on position state, not a hardcoded weekday
     window, so it self-corrects for any flat stretch: normally Wed through Thu pre-15:20
     since exit is Tuesday, but equally covers Mon/Tue too if an entry was ever missed, e.g.
     the 2026-07-02 incident this whole file exists because of): once/day
-    (`_refresh_daily_preview`), fetches that day's Nifty **session open** via the new
-    `get_nifty_open()` (Dhan `/marketfeed/ohlc`, not `/marketfeed/ltp` — see its docstring,
-    the exact response field is unverified against a live call yet), computes the would-be
+    (`_refresh_daily_preview`), gets that day's Nifty **session open**, computes the would-be
     ATM-50/ATM/ATM+50 3L straddle, resolves its 6 legs, then re-prices and reprints the
     cumulative premium every cycle. Purely a dry run — **never** writes
     active_options_position.json/options_journal.jsonl, never sends Telegram.
-    Skips Sat/Sun (`today.weekday() >= 5`) so a market-closed fetch failure doesn't
-    retry-storm every 30s all weekend — added 2026-07-05 after noticing the gap.
-  - **While a position is open** (Thu 15:25 through Tue 15:25): same cadence, but prints the
-    real position's current cumulative premium instead (one-shot REST fetch via
-    `_fetch_option_ltps_once`, not the ZMQ collector — simpler and independent of whether
-    ticks are flowing at that exact moment). Still terminal-only; the actual exit still goes
-    through `_try_auto_exit` above.
+    Skips Sat/Sun (`today.weekday() >= 5`).
+  - **While a position is open** (Thu 15:25 through Tue 15:25): same cadence, prints the
+    real position's current cumulative premium. Still terminal-only; the actual exit still
+    goes through `_try_auto_exit` above.
+
+  **Rewritten 2026-07-07 — both the Nifty spot/open fetch AND all premium reads are now
+  ZMQ-first, REST is gone from the normal path entirely:**
+  - **Nifty spot/open**: `NiftySpotCollector` subscribes to TW's P2 on ZMQ topic `b"NIFTY"`
+    (added to P2's feed the same day — see `TradingWebSockets/CLAUDE.md`'s "Dynamic
+    Subscriptions" section). Tracks the first tick of each IST day as a session-open proxy.
+    REST (`get_nifty_open`/`get_nifty_spot` in `src/signal.py`) is kept only as a fallback for
+    when ZMQ has no data yet (P2 not up, or no tick received this session yet) — under normal
+    operation this REST path is never exercised. A capped 15s wait-for-first-tick runs at
+    scheduler startup before the main loop begins, so the very first cycle doesn't hit REST
+    just because its own ZMQ subscriber hadn't warmed up yet (NIFTY ticks arrive several
+    times/second once subscribed, so 15s is a generous margin).
+  - **Retry cooldown**: `_refresh_daily_preview()` previously retried a failed fetch every 30s
+    forever (no backoff on the failure path, only a success gate) — this hammered Dhan's REST
+    endpoints for 297 logged attempts over two days and plausibly contributed to a 429
+    rate-limit block. Fixed with `_PREVIEW_RETRY_COOLDOWN_S = 300` (5 min).
+  - **Both premium branches** (open-position AND dry-run-preview) now read from `LtpCollector`
+    (ZMQ, `OPT_`-prefix topics), not REST. `_fetch_option_ltps_once` (the old REST helper) has
+    been deleted — it had become genuinely dead code once both call sites stopped using it.
+    Preview legs get their live ticks via `trading_core.subscription_registry.
+    request_subscription()`, requesting topics named `OPT_{strike}_{type}` with `strike`/
+    `option_type` passed through as extra payload fields — this is exactly what lets the
+    existing `LtpCollector` (already running for real positions) pick them up with zero new
+    consumer code. New legs typically start ticking within ~5 seconds of being requested.
+  - See `trading_core/CLAUDE.md`'s "Subscription Registry" section and the
+    `bug_scheduler_preview_retry_storm`/`project_p2_dynamic_subscriptions` memory entries for
+    the full incident/fix record.
+
+- **Stress test** (`stress_test_dynamic_subscriptions.py`, added 2026-07-07, kept as a
+  permanent utility): every N seconds (default 60), requests a random Nifty straddle strike
+  (±500 pts from spot, step 50) via the same `request_subscription()` path, and prints the
+  resulting premium once both legs tick. Validates the dynamic-subscription mechanism handles
+  a continuously growing, unpredictable working set gracefully — run it with
+  `START_STRESS_TEST.bat` or `uv run python stress_test_dynamic_subscriptions.py [--interval N]
+  [--iterations N]` (0 = forever). Uses its own `STRESS_`-prefixed topics, never mixes with
+  real `OPT_` trading data.
 
 Config: `D:\Trading\options_config.json`. Writes `data/scheduler_heartbeat.json` (ET Services
 tab row "Options Scheduler") and `data/scheduler.log`.
@@ -163,6 +194,8 @@ NiftyOptionsBacktest/
 ├── analyse_trades.py         # Per-leg analysis of historical trades (exit data inference)
 ├── options_ltp_service.py    # Standalone REST polling LTP service (ZMQ port 5557 fallback)
 ├── scheduler.py              # Standalone auto-pilot (added 2026-07-05) — see "Auto-Pilot" above
+├── stress_test_dynamic_subscriptions.py  # Permanent stress-test utility (added 2026-07-07) — see "Auto-Pilot" above
+├── START_STRESS_TEST.bat     # Launcher for the stress test above
 ├── SIGNAL.bat                # Thursday: compute ATM + order slip (manual/backup path)
 ├── ENTRY.bat                 # Thursday: log entry LTPs after fills (manual/backup path)
 ├── EXIT.bat                  # Tuesday: log exit LTPs after buyback (manual/backup path)
@@ -291,7 +324,7 @@ Brokerage: Rs 20/leg/side × 6 legs × 2 sides = Rs 240/trade.
 - `expiryCode=0` is falsy — API rejects it with "expiryCode is required". Use `1`.
 - No top-level `"status"` field in response — check `resp["data"]["ce"] is not None`
 - `data["pe"]` is `None` (not dict) when `drvOptionType="CALL"` — both sides are NOT returned together
-- **`POST /marketfeed/ltp` and `POST /marketfeed/ohlc` require security IDs as `int`, not `str`, in the request list** — found 2026-07-06. `{"IDX_I": ["13"]}` → `400 {"data":{"814":"Invalid Request"},"status":"failed"}`; `{"IDX_I": [13]}` → `200 success`. This is the opposite convention from `POST /charts/rollingoption` (used by `fetcher.py`), which wants `NIFTY_SECURITY_ID` as the string `"13"` — don't "fix" one to match the other, they're genuinely different endpoints with different expectations. Bit `get_nifty_spot()`/`get_nifty_open()` (`src/signal.py`) and `_fetch_option_ltps_once()` (`scheduler.py`), both fixed to cast to `int(...)` only in the request payload (dict keys/lookups elsewhere stay as strings, matching what the response actually returns).
+- **`POST /marketfeed/ltp` and `POST /marketfeed/ohlc` require security IDs as `int`, not `str`, in the request list** — found 2026-07-06. `{"IDX_I": ["13"]}` → `400 {"data":{"814":"Invalid Request"},"status":"failed"}`; `{"IDX_I": [13]}` → `200 success`. This is the opposite convention from `POST /charts/rollingoption` (used by `fetcher.py`), which wants `NIFTY_SECURITY_ID` as the string `"13"` — don't "fix" one to match the other, they're genuinely different endpoints with different expectations. `get_nifty_spot()`/`get_nifty_open()` (`src/signal.py`) cast to `int(...)` only in the request payload (dict keys/lookups elsewhere stay as strings, matching what the response actually returns) — these are now only exercised as a fallback, see "Auto-Pilot: scheduler.py" above. `_fetch_option_ltps_once()` (the REST helper this same fix originally applied to) was deleted 2026-07-07 once both its call sites moved to ZMQ.
 
 **Windows SSL:** `truststore.inject_into_ssl()` called at fetcher + signal module load. Required for Dhan's cert chain on Windows. Do not remove.
 
