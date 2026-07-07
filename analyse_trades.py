@@ -6,7 +6,6 @@ Drawdown  : max(sum of 3L leg HIGHs during hold) - entry_total_premium, x lot_si
 """
 from __future__ import annotations
 
-import sys
 from datetime import date, timedelta
 from pathlib import Path
 

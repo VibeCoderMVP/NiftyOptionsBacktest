@@ -15,7 +15,7 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
-from src.config import OPTION_TYPES, STRIKE_STEP, settings
+from src.config import OPTION_TYPES, settings
 
 console = Console()
 
@@ -93,7 +93,7 @@ def _print_report(df: pd.DataFrame, files: list[Path]) -> None:
     incomplete = len(df) - complete
     thin       = int((df["total_bars"] < MIN_BARS_PER_CYCLE).sum())
 
-    console.print(f"\n[bold]Options Data Coverage Report[/bold]")
+    console.print("\n[bold]Options Data Coverage Report[/bold]")
     console.print(f"  Total weekly cycles : {len(df)}")
     console.print(f"  Complete (10 legs)  : [green]{complete}[/green]")
     console.print(f"  Incomplete          : [red]{incomplete}[/red]")

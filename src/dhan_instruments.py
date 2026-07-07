@@ -8,7 +8,7 @@ so the LTP service and EasyTerminal can monitor live prices.
 from __future__ import annotations
 
 import time
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import httpx

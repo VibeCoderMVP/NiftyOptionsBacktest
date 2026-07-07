@@ -332,8 +332,8 @@ def _check_exit_timing() -> bool:
                 return True
             # N = wait until 15:20 and then auto-exit
             console.print(
-                f"[cyan]Waiting for 15:20 IST to auto-exit...[/cyan] "
-                f"Press Ctrl+C to abort."
+                "[cyan]Waiting for 15:20 IST to auto-exit...[/cyan] "
+                "Press Ctrl+C to abort."
             )
             try:
                 while True:

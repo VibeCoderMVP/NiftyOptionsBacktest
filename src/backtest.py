@@ -32,7 +32,7 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
-from src.config import NIFTY_LOT_SIZE, STRIKE_STEP, lot_size_for_date, settings
+from src.config import NIFTY_LOT_SIZE, lot_size_for_date, settings
 
 console = Console()
 

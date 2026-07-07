@@ -16,16 +16,12 @@ Nifty spot API call needed.
 """
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
-from pathlib import Path
 
 import pandas as pd
 from loguru import logger
 
 from src.config import (
-    LADDER_OFFSETS,
-    NIFTY_LOT_SIZE,
     OPTION_TYPES,
     REGIME_CHANGE_DATE,
     RELATIVE_STRIKES,

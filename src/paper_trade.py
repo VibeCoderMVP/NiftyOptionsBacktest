@@ -136,7 +136,7 @@ def log_entry(
     _update_active_position_ltps(legs_ltps)
 
     rs_collected = total_entry * lot_size * lots
-    console.print(f"[green]Paper entry logged.[/green]")
+    console.print("[green]Paper entry logged.[/green]")
     console.print(
         f"  ATM: {atm}  |  Expiry: {expiry_date}  |  "
         f"Entry premium: {total_entry:.2f} pts = Rs {rs_collected:.0f}"

@@ -155,7 +155,7 @@ def format_signal_message(
     lines = [
         "NIFTY WEEKLY OPTIONS - ENTRY SIGNAL",
         f"Date      : {entry_date} (Thursday)",
-        f"Regime    : tue_expiry | 4-day hold",
+        "Regime    : tue_expiry | 4-day hold",
         f"Nifty Spot: {spot:.0f}",
         f"ATM Strike: {atm}",
         f"Expiry    : {expiry_date} (Tuesday)",
@@ -168,7 +168,7 @@ def format_signal_message(
         lines.append(f"  {leg['strike']:<8} {leg['type']:<5} SELL 1 lot")
     lines += [
         "",
-        f"ENTER at 15:20-15:28 IST today.",
+        "ENTER at 15:20-15:28 IST today.",
         f"CLOSE ALL by 15:25 on {expiry_date} (Tuesday).",
         f"Lot size: {NIFTY_LOT_SIZE} shares/lot",
     ]
@@ -367,11 +367,11 @@ def run_signal(force: bool = False, spot: float | None = None) -> None:
     save_last_signal(today, expiry_date, spot, atm)
     write_active_position(today, expiry_date, spot, atm, legs)
     logger.info("Signal complete | ATM={} expiry={} spot={:.0f}", atm, expiry_date, spot)
-    console.print(f"[dim]Signal saved -> data/.last_signal.json[/dim]")
+    console.print("[dim]Signal saved -> data/.last_signal.json[/dim]")
     console.print(f"[dim]Active position file -> {ACTIVE_OPTIONS_PATH}[/dim]")
     console.print(
-        f"\n[dim]Next step: after placing orders, run:[/dim]\n"
-        f"[bold]uv run python pipeline.py paper-entry "
-        f"<ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>[/bold]\n"
-        f"[dim]LTP order: ATM-50 CE, ATM-50 PE, ATM CE, ATM PE, ATM+50 CE, ATM+50 PE[/dim]"
+        "\n[dim]Next step: after placing orders, run:[/dim]\n"
+        "[bold]uv run python pipeline.py paper-entry "
+        "<ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>[/bold]\n"
+        "[dim]LTP order: ATM-50 CE, ATM-50 PE, ATM CE, ATM PE, ATM+50 CE, ATM+50 PE[/dim]"
     )

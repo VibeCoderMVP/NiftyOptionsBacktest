@@ -1,5 +1,5 @@
 """Patch active_options_position.json with correct June 30 security IDs."""
-import json, os
+import json
 from pathlib import Path
 
 ACTIVE_PATH = Path(r"D:\Trading\active_options_position.json")
