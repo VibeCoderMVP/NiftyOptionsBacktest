@@ -10,7 +10,7 @@ that week, while ET itself only got restarted 2026-07-05. Moving the trigger to 
 own always-on process (same pattern as TW's P1/P2/P3 and every strategy monitor in
 this codebase) means it fires whether or not anyone has ET open.
 
-Three jobs, checked every 30s in IST, config from D:\\Trading\\options_config.json:
+Four jobs, checked every 30s in IST, config from D:\\Trading\\options_config.json:
 
 1. Auto-entry — configured weekday (default Thursday) at/after entry_time_ist
    (default 15:20), no open position:
@@ -44,6 +44,15 @@ Three jobs, checked every 30s in IST, config from D:\\Trading\\options_config.js
    switches to the real position's legs instead (via the live ZMQ ticks already being
    collected for the exit check) — this is a pure logging read, it never touches
    auto-entry/exit state.
+
+4. Strike-band monitor (added 2026-07-08, no Telegram, no journal/position writes) —
+   runs every day unconditionally, NOT gated on being flat like (3). Once per day, from
+   Nifty's session open, computes ATM and subscribes a 13-strike band (ATM +/- 300,
+   step 50 = 26 legs CE+PE) via request_subscription(), requester name
+   "nifty_strike_band_monitor". Pure visibility: gives premium coverage across a wide
+   band regardless of position state, and wide enough (+/-6 strikes) that a mid-day
+   scheduler restart (which recomputes "session open" from spot-at-restart-time, not
+   the true 09:15 open) still lands inside the covered range.
 
 Usage
 -----
@@ -256,6 +265,89 @@ class NiftySpotCollector:
     def session_open(self) -> float | None:
         with self._lock:
             return self._session_open
+
+
+_STRIKE_BAND_OFFSETS = list(range(-300, 301, 50))  # 13 strikes: ATM-300..ATM+300 step 50
+
+
+class StrikeBandState:
+    """Today's 13-strike premium-monitoring band (ATM +/- 300, step 50), centered on
+    Nifty's session open. Purely additive visibility — runs every day regardless of
+    whether a real position is open, unlike PreviewState below (which only matters
+    while flat, for the entry-decision dry-run). No journal/Telegram/position writes;
+    subscribes legs onto P2's live feed via the same registry so ET's Options tab and
+    this file's own LtpCollector can read premiums for the whole band, not just the
+    6 legs of an actual position."""
+
+    def __init__(self) -> None:
+        self.computed_date: date | None = None
+        self.atm: int | None = None
+        self.strikes: list[int] = []
+        self.last_attempt_mono: float | None = None
+
+
+def _refresh_strike_band(band: StrikeBandState, nifty_spot: NiftySpotCollector) -> None:
+    """Once per day: resolve and subscribe a 13-strike band centered on Nifty's session
+    open, independent of position state. Same fetch/fallback/retry-cooldown shape as
+    _refresh_daily_preview (ZMQ session open preferred, REST fallback, 5-min cooldown
+    on failure) — kept as a separate function/state rather than merged into
+    PreviewState so the entry-decision preview logic above is untouched by this."""
+    today = _ist_now().date()
+    if band.computed_date == today:
+        return
+    if today.weekday() >= 5:  # Sat/Sun — market shut
+        return
+
+    now_mono = time.monotonic()
+    if (
+        band.last_attempt_mono is not None
+        and now_mono - band.last_attempt_mono < _PREVIEW_RETRY_COOLDOWN_S
+    ):
+        return
+    band.last_attempt_mono = now_mono
+
+    open_px = nifty_spot.session_open() or nifty_spot.spot()
+    if open_px is None:
+        open_px = get_nifty_open() or get_nifty_spot()
+    if open_px is None:
+        logger.warning(
+            "STRIKE BAND: could not fetch Nifty open/spot from ZMQ or REST — retrying in {}s",
+            _PREVIEW_RETRY_COOLDOWN_S,
+        )
+        return
+
+    atm = compute_atm(open_px)
+    strikes = [atm + off for off in _STRIKE_BAND_OFFSETS]
+    expiry = next_expiry_tuesday(today)
+    try:
+        resolved = resolve_option_ids(strikes, expiry)
+    except Exception as exc:
+        logger.warning("STRIKE BAND: could not resolve option security IDs: {}", exc)
+        return
+
+    band.computed_date = today
+    band.atm = atm
+    band.strikes = strikes
+
+    try:
+        request_subscription("nifty_strike_band_monitor", [
+            {
+                "exchange_segment": "NSE_FNO",
+                "security_id": str(c["security_id"]),
+                "topic": f"OPT_{c['strike']}_{c['option_type']}",
+                "strike": int(c["strike"]),
+                "option_type": str(c["option_type"]),
+            }
+            for c in resolved
+        ])
+    except Exception as exc:
+        logger.warning("STRIKE BAND: could not request live subscription: {}", exc)
+        return
+
+    logger.info(
+        "STRIKE BAND: subscribed {} strikes ({} legs) centered on ATM {} (open {:.2f}): {}",
+        len(strikes), len(resolved), atm, open_px, strikes,
+    )
 
 
 class PreviewState:
@@ -589,6 +681,7 @@ def main() -> None:
 
     fired: dict[str, date] = {}
     preview = PreviewState()
+    band = StrikeBandState()
     last_hb = time.monotonic()
     last_preview_hb = 0.0
 
@@ -602,6 +695,10 @@ def main() -> None:
             pos = _read_active_position()
             if not (pos and pos.get("status") == "open"):
                 _refresh_daily_preview(preview, nifty_spot)
+
+            # Strike-band monitor runs every day regardless of position state — pure
+            # visibility, not gated on being flat like the entry-decision preview above.
+            _refresh_strike_band(band, nifty_spot)
 
             now_mono = time.monotonic()
             if now_mono - last_preview_hb >= _PREVIEW_HEARTBEAT_INTERVAL_S:

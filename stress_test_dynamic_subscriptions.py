@@ -10,12 +10,23 @@ and no P2 code change, exactly the "future strategy needs new security IDs on th
 this registry was built for.
 
 Uses its own topic prefix (STRESS_) so its ticks never mix with real trading data (LtpCollector
-only ever subscribes to OPT_).
+only ever subscribes to OPT_) -- but it still subscribes real security IDs on the ONE live P2
+WebSocket, since there's only ever one Dhan connection. There is no isolated "test P2" to run
+this against; running it means it is live on the same feed every other strategy reads.
+
+RUN THIS MANUALLY, FOR VALIDATION ONLY -- DO NOT LEAVE IT RUNNING (changed 2026-07-08).
+Originally documented as a permanent background utility; downgraded after it was found still
+running during real market hours, injecting fake STRESS_* subscriptions into the live P2 feed
+without that being anyone's intent. Run it after a change to the subscription registry itself
+to confirm the mechanism still works end-to-end, then Ctrl+C it and delete
+D:\\Trading\\dynamic_subscriptions\\stress_test_dynamic_subscriptions.json -- killing the
+process does NOT un-subscribe its legs or stop P2 from re-reading that stale request file on
+its next restart (see TradingWebSockets/CLAUDE.md's "Dynamic Subscriptions" gotcha).
 
 Usage:
   uv run python stress_test_dynamic_subscriptions.py                 # forever, 60s interval
   uv run python stress_test_dynamic_subscriptions.py --interval 30 --iterations 20
-  Ctrl+C to stop.
+  Ctrl+C to stop, then delete its dynamic_subscriptions/*.json request file (see above).
 
 Logs to stderr and data/stress_test_dynamic_subscriptions.log.
 """

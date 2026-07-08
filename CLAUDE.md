@@ -146,14 +146,36 @@ in this codebase (TW's P1/P2/P3, each strategy's monitor.py):
     `bug_scheduler_preview_retry_storm`/`project_p2_dynamic_subscriptions` memory entries for
     the full incident/fix record.
 
-- **Stress test** (`stress_test_dynamic_subscriptions.py`, added 2026-07-07, kept as a
-  permanent utility): every N seconds (default 60), requests a random Nifty straddle strike
-  (±500 pts from spot, step 50) via the same `request_subscription()` path, and prints the
-  resulting premium once both legs tick. Validates the dynamic-subscription mechanism handles
-  a continuously growing, unpredictable working set gracefully — run it with
+- **Strike band monitor** (`_refresh_strike_band` / `StrikeBandState`, added 2026-07-08):
+  runs every day, unconditionally — unlike the entry-decision preview above, this does NOT
+  gate on being flat. Once/day, from Nifty's session open (same ZMQ-first/REST-fallback
+  source as the preview), computes ATM and subscribes a **13-strike band (ATM ± 300, step
+  50 = 26 legs, CE+PE)** via the same `request_subscription()` path, requester name
+  `nifty_strike_band_monitor`, topics `OPT_{strike}_{type}` (real prefix, not a test one —
+  safe because both `LtpCollector` here and ET's `zmq_options.py` already filter ticks
+  client-side to only the strikes they actually care about, so extra band legs are silently
+  ignored by anything not asking for them). Purpose: continuous premium visibility across a
+  wide strike range regardless of position state, and specifically wide enough (±6 strikes)
+  that a mid-day scheduler restart — which recomputes "session open" from whatever Nifty
+  spot is at restart time, not the true 09:15 open, see `NiftySpotCollector`'s docstring —
+  still lands well inside the covered band rather than going stale. Terminal-only, same as
+  the entry-decision preview: no journal/Telegram/position side effects.
+
+- **Stress test** (`stress_test_dynamic_subscriptions.py`, added 2026-07-07) — **run only for
+  ad hoc validation of the dynamic-subscription mechanism itself, never leave it running.**
+  Originally documented as a "permanent utility" to keep running always; downgraded 2026-07-08
+  after it was found actively injecting 4 fake `STRESS_*`-prefixed strikes into the live P2
+  feed during real market hours, which the user had not intended and does not want by default.
+  Every N seconds (default 60), requests a random Nifty straddle strike (±500 pts from spot,
+  step 50) via the same `request_subscription()` path, and prints the resulting premium once
+  both legs tick — still useful for confirming the registry mechanism works end-to-end after a
+  change to it, just not as a standing background process. Run manually with
   `START_STRESS_TEST.bat` or `uv run python stress_test_dynamic_subscriptions.py [--interval N]
-  [--iterations N]` (0 = forever). Uses its own `STRESS_`-prefixed topics, never mixes with
-  real `OPT_` trading data.
+  [--iterations N]` (0 = forever), then **stop it and delete
+  `D:\Trading\dynamic_subscriptions\stress_test_dynamic_subscriptions.json` when done** — see
+  `TradingWebSockets/CLAUDE.md`'s "Dynamic Subscriptions" gotcha: killing the process alone
+  does not un-subscribe its legs or stop P2 from re-reading its stale request file on the next
+  restart.
 
 Config: `D:\Trading\options_config.json`. Writes `data/scheduler_heartbeat.json` (ET Services
 tab row "Options Scheduler") and `data/scheduler.log`.
@@ -194,7 +216,7 @@ NiftyOptionsBacktest/
 ├── analyse_trades.py         # Per-leg analysis of historical trades (exit data inference)
 ├── options_ltp_service.py    # Standalone REST polling LTP service (ZMQ port 5557 fallback)
 ├── scheduler.py              # Standalone auto-pilot (added 2026-07-05) — see "Auto-Pilot" above
-├── stress_test_dynamic_subscriptions.py  # Permanent stress-test utility (added 2026-07-07) — see "Auto-Pilot" above
+├── stress_test_dynamic_subscriptions.py  # Ad hoc validation utility, run manually only (added 2026-07-07) — see "Auto-Pilot" above
 ├── START_STRESS_TEST.bat     # Launcher for the stress test above
 ├── SIGNAL.bat                # Thursday: compute ATM + order slip (manual/backup path)
 ├── ENTRY.bat                 # Thursday: log entry LTPs after fills (manual/backup path)
