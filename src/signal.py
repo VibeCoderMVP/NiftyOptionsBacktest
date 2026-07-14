@@ -134,6 +134,20 @@ def next_expiry_tuesday(from_date: date) -> date:
     return from_date + timedelta(days=days)
 
 
+def current_or_next_expiry_tuesday(from_date: date) -> date:
+    """Like next_expiry_tuesday, but returns from_date itself when from_date already IS
+    a Tuesday — i.e. the currently-open position's own expiry day — instead of skipping
+    ahead to next week. next_expiry_tuesday's `or 7` fallback is correct for its own
+    Thursday-entry callers but silently resolves to the WRONG (next week's) contract
+    when called with today's date on an actual Tuesday expiry day. Use this for any
+    caller that resolves "the expiry currently relevant to right now" rather than
+    "the expiry of a fresh Thursday entry" (see scheduler.py's strike-band monitor and
+    dry-run preview, which both call this with `today` and can run on a Tuesday)."""
+    if from_date.weekday() == 1:
+        return from_date
+    return next_expiry_tuesday(from_date)
+
+
 def build_order_slip(atm: int) -> list[dict]:
     return [
         {"strike": atm - 50, "type": "CE"},

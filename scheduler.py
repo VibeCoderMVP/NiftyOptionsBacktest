@@ -78,8 +78,8 @@ from loguru import logger
 from src import paper_trade
 from src.dhan_instruments import resolve_option_ids
 from src.signal import (
-    ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, get_nifty_open,
-    get_nifty_spot, next_expiry_tuesday, run_signal, send_telegram,
+    ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, current_or_next_expiry_tuesday,
+    get_nifty_open, get_nifty_spot, run_signal, send_telegram,
 )
 from trading_core.subscription_registry import request_subscription
 
@@ -318,7 +318,7 @@ def _refresh_strike_band(band: StrikeBandState, nifty_spot: NiftySpotCollector) 
 
     atm = compute_atm(open_px)
     strikes = [atm + off for off in _STRIKE_BAND_OFFSETS]
-    expiry = next_expiry_tuesday(today)
+    expiry = current_or_next_expiry_tuesday(today)
     try:
         resolved = resolve_option_ids(strikes, expiry)
     except Exception as exc:
@@ -410,7 +410,7 @@ def _refresh_daily_preview(preview: PreviewState, nifty_spot: NiftySpotCollector
 
     atm = compute_atm(open_px)
     legs_ct = build_order_slip(atm)   # [{"strike":.., "type":..}, ...] x 6, ATM-50/ATM/ATM+50 order
-    expiry = next_expiry_tuesday(today)
+    expiry = current_or_next_expiry_tuesday(today)
     try:
         resolved = resolve_option_ids([atm - 50, atm, atm + 50], expiry)
     except Exception as exc:
