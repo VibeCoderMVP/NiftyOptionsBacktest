@@ -11,6 +11,54 @@ Two things in one repo:
 
 ---
 
+## Two parallel ladder variants (added 2026-07-21)
+
+`src/config.py::LADDER_VARIANTS` drives the whole forward-test loop as a list of variant
+dicts, not a single hardcoded config, since 2026-07-21:
+
+| Variant | id | offset | paper_only | active file | journal file |
+|---|---|---|---|---|---|
+| Live | `3L-50` | 50 | `False` | `active_options_position.json` | `options_journal.jsonl` |
+| Paper (calm-tail track) | `3L-100` | 100 | `True` | `active_options_position_3l100.json` | `options_journal_3l100.jsonl` |
+
+Both are always exactly 3 strikes x CE+PE = 6 legs — only the strike offset differs, so the
+`len(legs) != 6` guards throughout the codebase stay correct for either variant unmodified.
+3L-100 was added because the offline ladder-width backtest
+(`data/LADDER_WIDTH_50_VS_100_REPORT.md`) showed near-identical total P&L (ρ≈0.99 weekly
+correlation) but a meaningfully calmer left tail (max loss Rs -4,346 vs -7,792 in tue_expiry) —
+too promising to ignore, too thin a sample (26 weeks) to switch the live ladder on. 3L-100
+therefore runs as a second always-on **paper-only** track inside the same `scheduler.py`
+process, same 15:20/15:25 clock, writing to its own separate active-position/journal files so
+neither variant's state machine can collide with the other's.
+
+`src/signal.py::build_order_slip`/`write_active_position`/`run_signal` and
+`src/paper_trade.py::log_entry`/`log_exit` all take an `offset`/`active_path`/`journal_path`
+(and `ladder_id`/`variant_label`) parameter now, defaulting to the exact pre-2026-07-21 3L-50
+behavior — a call site that doesn't pass these keeps working unchanged (verified byte-identical
+regression on the active-position payload and journal record for `offset=50` defaults).
+
+**3L-100's own live LTP subscription, not just the strike-band monitor.** TW's `tick_service.py`
+only auto-subscribes contracts by watching `active_options_position.json`'s mtime — a single
+hardcoded path. 3L-100 writes to a *different* file, so that auto-subscribe mechanism never
+sees it. `scheduler.py::_subscribe_variant_legs()` fixes this by calling
+`request_subscription()` directly for each variant's own 6 legs right after signal (same
+mechanism `nifty_strike_band_monitor` already uses) — so 3L-100's feed doesn't silently depend
+on the daily strike-band job's health.
+
+**Config gating is independent per variant.** `options_config.json`'s top-level `auto_entry`/
+`auto_exit` gate 3L-50 only (unchanged). A new `"ladder_100": {"enabled": true, "paper_mode":
+true, "lots": 1}` block gates 3L-100 independently — so pausing live 3L-50 doesn't stop 3L-100
+paper-testing, and vice versa.
+
+**Telegram messages for 3L-100 are always tagged `[3L-100 PAPER ONLY -- DO NOT PLACE REAL
+ORDERS]`** — the existing 3L-50 message wording (which reads as "go place 6 SELL orders") would
+otherwise be dangerously ambiguous for a paper-only track.
+
+**EasyTerminal's Options tab (F4) shows both, stacked** — see `EasyTerminal/CLAUDE.md`'s Options
+Tab section for the display side.
+
+---
+
 ## Running the Historical Pipeline
 
 Always run from `D:\Trading\NiftyOptionsBacktest\` with `uv run`:

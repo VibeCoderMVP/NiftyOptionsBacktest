@@ -148,14 +148,14 @@ def current_or_next_expiry_tuesday(from_date: date) -> date:
     return next_expiry_tuesday(from_date)
 
 
-def build_order_slip(atm: int) -> list[dict]:
+def build_order_slip(atm: int, offset: int = 50) -> list[dict]:
     return [
-        {"strike": atm - 50, "type": "CE"},
-        {"strike": atm - 50, "type": "PE"},
-        {"strike": atm,      "type": "CE"},
-        {"strike": atm,      "type": "PE"},
-        {"strike": atm + 50, "type": "CE"},
-        {"strike": atm + 50, "type": "PE"},
+        {"strike": atm - offset, "type": "CE"},
+        {"strike": atm - offset, "type": "PE"},
+        {"strike": atm,          "type": "CE"},
+        {"strike": atm,          "type": "PE"},
+        {"strike": atm + offset, "type": "CE"},
+        {"strike": atm + offset, "type": "PE"},
     ]
 
 
@@ -165,16 +165,23 @@ def format_signal_message(
     legs: list[dict],
     entry_date: date,
     expiry_date: date,
+    variant_label: str = "3L-50",
+    paper_only: bool = False,
 ) -> str:
+    banner = (
+        f"[{variant_label} PAPER ONLY -- DO NOT PLACE REAL ORDERS]"
+        if paper_only else f"[{variant_label} LIVE]"
+    )
     lines = [
-        "NIFTY WEEKLY OPTIONS - ENTRY SIGNAL",
+        f"NIFTY WEEKLY OPTIONS - ENTRY SIGNAL {banner}",
         f"Date      : {entry_date} (Thursday)",
         "Regime    : tue_expiry | 4-day hold",
         f"Nifty Spot: {spot:.0f}",
         f"ATM Strike: {atm}",
         f"Expiry    : {expiry_date} (Tuesday)",
         "",
-        "ORDER SLIP (all SELL, 1 lot each):",
+        "ORDER SLIP (all SELL, 1 lot each):" if not paper_only
+        else "PAPER ORDER SLIP (tracking only, all SELL, 1 lot each):",
         f"  {'Strike':<8} {'Type':<5} Action",
         f"  {'-'*28}",
     ]
@@ -182,8 +189,10 @@ def format_signal_message(
         lines.append(f"  {leg['strike']:<8} {leg['type']:<5} SELL 1 lot")
     lines += [
         "",
-        "ENTER at 15:20-15:28 IST today.",
-        f"CLOSE ALL by 15:25 on {expiry_date} (Tuesday).",
+        ("ENTER at 15:20-15:28 IST today." if not paper_only
+         else "PAPER ONLY -- no real orders to place for this variant."),
+        f"CLOSE ALL by 15:25 on {expiry_date} (Tuesday)." if not paper_only
+        else f"Paper-closes automatically by 15:25 on {expiry_date} (Tuesday).",
         f"Lot size: {NIFTY_LOT_SIZE} shares/lot",
     ]
     return "\n".join(lines)
@@ -224,17 +233,22 @@ def write_active_position(
     atm: int,
     legs: list[dict],
     entry_ltps: list[float] | None = None,
+    offset: int = 50,
+    active_path: Path | None = None,
+    variant_label: str = "3L-50",
 ) -> None:
     """
-    Write D:\\Trading\\active_options_position.json — the shared coordination file
-    read by options_ltp_service.py and EasyTerminal to know which contracts to track.
+    Write D:\\Trading\\active_options_position.json (or a variant's own path) --
+    the shared coordination file read by options_ltp_service.py and EasyTerminal
+    to know which contracts to track.
 
     legs: list of {"strike": int, "type": "CE"|"PE"} from build_order_slip()
-    entry_ltps: 6 floats in ATM-50 CE/PE, ATM CE/PE, ATM+50 CE/PE order (optional)
+    entry_ltps: 6 floats in ATM-offset CE/PE, ATM CE/PE, ATM+offset CE/PE order (optional)
     """
     from src.dhan_instruments import resolve_option_ids
 
-    strikes = [atm - 50, atm, atm + 50]
+    active_path = active_path or ACTIVE_OPTIONS_PATH
+    strikes = [atm - offset, atm, atm + offset]
     try:
         resolved = resolve_option_ids(strikes, expiry_date)
     except Exception as exc:
@@ -252,6 +266,7 @@ def write_active_position(
 
     payload = {
         "strategy_name": "nifty_weekly_theta",
+        "ladder_id":    variant_label,
         "status":       "open",
         "updated_at":   _ist_now().isoformat(timespec="seconds"),
         "entry_date":   str(entry_date),
@@ -261,12 +276,13 @@ def write_active_position(
         "contracts":    contracts,
     }
 
-    _tmp = ACTIVE_OPTIONS_PATH.with_suffix(".tmp")
+    _tmp = active_path.with_suffix(".tmp")
     _tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    _tmp.replace(ACTIVE_OPTIONS_PATH)
+    _tmp.replace(active_path)
     logger.info(
-        "Active position written -> {} | ATM={} expiry={} ids={}",
-        ACTIVE_OPTIONS_PATH,
+        "Active position written -> {} | ladder={} ATM={} expiry={} ids={}",
+        active_path,
+        variant_label,
         atm,
         expiry_date,
         [c["security_id"] for c in contracts],
@@ -280,7 +296,15 @@ def load_last_signal() -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def run_signal(force: bool = False, spot: float | None = None) -> None:
+def run_signal(
+    force: bool = False,
+    spot: float | None = None,
+    offset: int = 50,
+    active_path: Path | None = None,
+    variant_label: str = "3L-50",
+    paper_only: bool = False,
+    save_signal: bool = True,
+) -> None:
     today = _ist_now().date()
     now   = _ist_now()
 
@@ -349,10 +373,11 @@ def run_signal(force: bool = False, spot: float | None = None) -> None:
 
     atm         = compute_atm(spot)
     expiry_date = next_expiry_tuesday(today)
-    legs        = build_order_slip(atm)
+    legs        = build_order_slip(atm, offset)
+    active_path = active_path or ACTIVE_OPTIONS_PATH
 
     table = Table(
-        title=f"NIFTY ENTRY SIGNAL | Entry: {today} (Thu) | Expiry: {expiry_date} (Tue)",
+        title=f"NIFTY ENTRY SIGNAL [{variant_label}] | Entry: {today} (Thu) | Expiry: {expiry_date} (Tue)",
         show_lines=True,
     )
     table.add_column("Strike", style="cyan",   justify="right")
@@ -376,16 +401,29 @@ def run_signal(force: bool = False, spot: float | None = None) -> None:
     console.print(f"[dim]Lot size: {NIFTY_LOT_SIZE} shares | Brokerage est: Rs 120 for 6 legs[/dim]")
     console.print()
 
-    msg = format_signal_message(spot, atm, legs, today, expiry_date)
-    send_telegram(msg)
-    save_last_signal(today, expiry_date, spot, atm)
-    write_active_position(today, expiry_date, spot, atm, legs)
-    logger.info("Signal complete | ATM={} expiry={} spot={:.0f}", atm, expiry_date, spot)
-    console.print("[dim]Signal saved -> data/.last_signal.json[/dim]")
-    console.print(f"[dim]Active position file -> {ACTIVE_OPTIONS_PATH}[/dim]")
-    console.print(
-        "\n[dim]Next step: after placing orders, run:[/dim]\n"
-        "[bold]uv run python pipeline.py paper-entry "
-        "<ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>[/bold]\n"
-        "[dim]LTP order: ATM-50 CE, ATM-50 PE, ATM CE, ATM PE, ATM+50 CE, ATM+50 PE[/dim]"
+    msg = format_signal_message(
+        spot, atm, legs, today, expiry_date,
+        variant_label=variant_label, paper_only=paper_only,
     )
+    send_telegram(msg)
+    if save_signal:
+        save_last_signal(today, expiry_date, spot, atm)
+    write_active_position(
+        today, expiry_date, spot, atm, legs,
+        offset=offset, active_path=active_path, variant_label=variant_label,
+    )
+    logger.info(
+        "Signal complete | variant={} ATM={} expiry={} spot={:.0f}",
+        variant_label, atm, expiry_date, spot,
+    )
+    if save_signal:
+        console.print("[dim]Signal saved -> data/.last_signal.json[/dim]")
+    console.print(f"[dim]Active position file -> {active_path}[/dim]")
+    if not paper_only:
+        console.print(
+            "\n[dim]Next step: after placing orders, run:[/dim]\n"
+            "[bold]uv run python pipeline.py paper-entry "
+            "<ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>[/bold]\n"
+            f"[dim]LTP order: ATM-{offset} CE, ATM-{offset} PE, ATM CE, ATM PE, "
+            f"ATM+{offset} CE, ATM+{offset} PE[/dim]"
+        )

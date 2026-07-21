@@ -36,14 +36,14 @@ def _ist_now() -> datetime:
     return datetime.now(timezone.utc) + _IST
 
 
-def _journal_path() -> Path:
-    p = Path(settings.data_dir) / "options_journal.jsonl"
+def _journal_path(journal_path: Path | None = None) -> Path:
+    p = journal_path or (Path(settings.data_dir) / "options_journal.jsonl")
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
-def _load_journal() -> list[dict]:
-    path = _journal_path()
+def _load_journal(journal_path: Path | None = None) -> list[dict]:
+    path = _journal_path(journal_path)
     if not path.exists():
         return []
     records = []
@@ -57,8 +57,8 @@ def _load_journal() -> list[dict]:
     return records
 
 
-def _save_journal(records: list[dict]) -> None:
-    _journal_path().write_text(
+def _save_journal(records: list[dict], journal_path: Path | None = None) -> None:
+    _journal_path(journal_path).write_text(
         "\n".join(json.dumps(r, default=str) for r in records) + "\n",
         encoding="utf-8",
     )
@@ -77,12 +77,16 @@ def log_entry(
     entry_date: date | None = None,
     lots: int = 1,
     regime: str = "tue_expiry",
+    offset: int = 50,
+    active_path: Path | None = None,
+    journal_path: Path | None = None,
+    ladder_id: str = "3L-50",
 ) -> dict:
     """
     Log a new paper trade entry.
 
     legs_ltps: 6 floats in order —
-      [ATM-50 CE, ATM-50 PE, ATM CE, ATM PE, ATM+50 CE, ATM+50 PE]
+      [ATM-offset CE, ATM-offset PE, ATM CE, ATM PE, ATM+offset CE, ATM+offset PE]
     """
     if len(legs_ltps) != 6:
         raise ValueError(f"Expected 6 LTP values, got {len(legs_ltps)}")
@@ -92,7 +96,7 @@ def log_entry(
     entry_time  = _ist_now().strftime("%Y-%m-%d %H:%M")
     lot_size    = NIFTY_LOT_SIZE
 
-    strikes = [atm - 50, atm - 50, atm, atm, atm + 50, atm + 50]
+    strikes = [atm - offset, atm - offset, atm, atm, atm + offset, atm + offset]
     types   = ["CE", "PE", "CE", "PE", "CE", "PE"]
 
     legs: list[dict[str, Any]] = [
@@ -110,6 +114,9 @@ def log_entry(
 
     record: dict[str, Any] = {
         "regime":              regime,
+        "ladder_size":         "3L",
+        "ladder_width":        offset,
+        "ladder_id":           ladder_id,
         "entry_date":          str(entry_date),
         "expiry_date":         str(expiry_date),
         "entry_time":          entry_time,
@@ -127,13 +134,13 @@ def log_entry(
         "paper_trade":         True,
     }
 
-    records = _load_journal()
+    records = _load_journal(journal_path)
     records.append(record)
-    _save_journal(records)
+    _save_journal(records, journal_path)
 
     # Backfill entry LTPs into the shared position file so the LTP service can
     # show unrealized P&L from the moment paper-entry is run.
-    _update_active_position_ltps(legs_ltps)
+    _update_active_position_ltps(legs_ltps, active_path)
 
     rs_collected = total_entry * lot_size * lots
     console.print("[green]Paper entry logged.[/green]")
@@ -146,20 +153,25 @@ def log_entry(
         f"uv run python pipeline.py paper-exit <6 LTPs>[/dim]"
     )
     logger.info(
-        "Paper entry | ATM={} expiry={} premium_pts={:.2f} Rs_collected={:.0f}",
-        atm, expiry_date, total_entry, rs_collected,
+        "Paper entry | ladder={} ATM={} expiry={} premium_pts={:.2f} Rs_collected={:.0f}",
+        ladder_id, atm, expiry_date, total_entry, rs_collected,
     )
     return record
 
 
-def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> dict:
+def log_exit(
+    exit_ltps: list[float],
+    exit_time: str | None = None,
+    active_path: Path | None = None,
+    journal_path: Path | None = None,
+) -> dict:
     """
     Close the last open paper trade with exit LTPs (same order as entry).
     """
     if len(exit_ltps) != 6:
         raise ValueError(f"Expected 6 exit LTP values, got {len(exit_ltps)}")
 
-    records = _load_journal()
+    records = _load_journal(journal_path)
     open_idx = next(
         (i for i in reversed(range(len(records))) if records[i].get("outcome") is None),
         None,
@@ -191,8 +203,8 @@ def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> dict:
     })
 
     records[open_idx] = rec
-    _save_journal(records)
-    _close_active_position()
+    _save_journal(records, journal_path)
+    _close_active_position(active_path)
 
     color = "green" if net_pnl_rs > 0 else "red"
     console.print(f"[{color}]Paper exit logged. Outcome: {rec['outcome']}[/{color}]")
@@ -211,35 +223,37 @@ def log_exit(exit_ltps: list[float], exit_time: str | None = None) -> dict:
     return rec
 
 
-def _update_active_position_ltps(entry_ltps: list[float]) -> None:
-    """Merge confirmed entry LTPs into active_options_position.json after paper-entry."""
-    if not ACTIVE_OPTIONS_PATH.exists():
+def _update_active_position_ltps(entry_ltps: list[float], active_path: Path | None = None) -> None:
+    """Merge confirmed entry LTPs into the active position file after paper-entry."""
+    path = active_path or ACTIVE_OPTIONS_PATH
+    if not path.exists():
         return
     try:
-        data = json.loads(ACTIVE_OPTIONS_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         contracts = data.get("contracts", [])
         for i, ltp in enumerate(entry_ltps):
             if i < len(contracts):
                 contracts[i]["entry_ltp"] = ltp
         data["contracts"] = contracts
         data["updated_at"] = _ist_now().isoformat(timespec="seconds")
-        ACTIVE_OPTIONS_PATH.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
     except Exception as exc:
-        logger.warning("Could not update active position LTPs: {}", exc)
+        logger.warning("Could not update active position LTPs ({}): {}", path, exc)
 
 
-def _close_active_position() -> None:
+def _close_active_position(active_path: Path | None = None) -> None:
     """Mark the active position as closed so the LTP service stops polling."""
-    if not ACTIVE_OPTIONS_PATH.exists():
+    path = active_path or ACTIVE_OPTIONS_PATH
+    if not path.exists():
         return
     try:
-        data = json.loads(ACTIVE_OPTIONS_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         data["status"] = "closed"
         data["updated_at"] = _ist_now().isoformat(timespec="seconds")
-        ACTIVE_OPTIONS_PATH.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-        logger.info("Active position marked closed -> {}", ACTIVE_OPTIONS_PATH)
+        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        logger.info("Active position marked closed -> {}", path)
     except Exception as exc:
-        logger.warning("Could not close active position file: {}", exc)
+        logger.warning("Could not close active position file ({}): {}", path, exc)
 
 
 def show_journal() -> None:

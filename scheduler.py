@@ -76,6 +76,7 @@ import zmq
 from loguru import logger
 
 from src import paper_trade
+from src.config import LADDER_VARIANTS, settings
 from src.dhan_instruments import resolve_option_ids
 from src.signal import (
     ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, current_or_next_expiry_tuesday,
@@ -123,11 +124,11 @@ def _read_cfg() -> dict:
         return {}
 
 
-def _read_active_position() -> dict | None:
-    if not ACTIVE_OPTIONS_PATH.exists():
+def _read_active_position(path: Path = ACTIVE_OPTIONS_PATH) -> dict | None:
+    if not path.exists():
         return None
     try:
-        return json.loads(ACTIVE_OPTIONS_PATH.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
@@ -497,8 +498,58 @@ def _log_premium_heartbeat(preview: PreviewState, collector: LtpCollector) -> No
     )
 
 
-def _try_auto_entry(cfg: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
-    if not cfg.get("auto_entry"):
+def _variant_entry_enabled(cfg: dict, variant: dict) -> bool:
+    """3L-50 is gated by the top-level auto_entry flag (unchanged). 3L-100 is gated
+    independently by ladder_100.enabled, so it can keep paper-testing even while
+    live 3L-50 auto-entry is paused, and vice versa."""
+    if variant["id"] == "3L-50":
+        return bool(cfg.get("auto_entry"))
+    return bool(cfg.get("ladder_100", {}).get("enabled", False))
+
+
+def _variant_exit_enabled(cfg: dict, variant: dict) -> bool:
+    if variant["id"] == "3L-50":
+        return bool(cfg.get("auto_exit"))
+    return bool(cfg.get("ladder_100", {}).get("enabled", False))
+
+
+def _journal_path_for(variant: dict) -> Path:
+    return settings.data_dir / variant["journal_filename"]
+
+
+def _subscribe_variant_legs(variant: dict, pos: dict) -> None:
+    """Request a dedicated live subscription for this variant's own 6 legs.
+
+    3L-50's legs are already auto-subscribed by tick_service watching
+    active_options_position.json's mtime. That file-watch mechanism only covers
+    that one hardcoded path — a second variant's own active_path is invisible to
+    it. Without this, 3L-100 would depend entirely on the daily strike-band
+    monitor (ATM+/-300) for LTPs, with no independent subscription of its own; if
+    that job ever died, 3L-100 would go dark silently. Requesting it directly
+    here (same mechanism the strike-band monitor already uses) makes 3L-100's
+    feed independent of that job's health. Harmless/idempotent for 3L-50 too."""
+    contracts = pos.get("contracts", [])
+    if not contracts:
+        return
+    requester = f"nifty_options_{variant['id'].replace('-', '_').lower()}"
+    try:
+        request_subscription(requester, [
+            {
+                "exchange_segment": c.get("exchange_segment", "NSE_FNO"),
+                "security_id": str(c["security_id"]),
+                "topic": f"OPT_{c['strike']}_{c['option_type']}",
+                "strike": int(c["strike"]),
+                "option_type": str(c["option_type"]),
+            }
+            for c in contracts
+        ])
+    except Exception as exc:
+        logger.warning("{}: could not request dedicated leg subscription: {}", variant["id"], exc)
+
+
+def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
+    vid = variant["id"]
+    if not _variant_entry_enabled(cfg, variant):
         return
     now = _ist_now()
     try:
@@ -511,29 +562,40 @@ def _try_auto_entry(cfg: dict, collector: LtpCollector, fired: dict[str, date]) 
         return
     if not (now.hour > eh or (now.hour == eh and now.minute >= em)):
         return
-    if fired.get("entry") == now.date():
+    if fired.get(f"entry_{vid}") == now.date():
         return
 
-    pos = _read_active_position()
+    active_path = variant["active_path"]
+    journal_path = _journal_path_for(variant)
+
+    pos = _read_active_position(active_path)
     if pos and pos.get("status") == "open":
         return  # already have an open position — nothing to do
 
-    fired["entry"] = now.date()  # mark attempted regardless of outcome — never retry-storm same day
-    logger.info("AUTO-ENTRY triggered at {} IST", now.strftime("%H:%M:%S"))
+    # mark attempted regardless of outcome — never retry-storm same day
+    fired[f"entry_{vid}"] = now.date()
+    logger.info("[{}] AUTO-ENTRY triggered at {} IST", vid, now.strftime("%H:%M:%S"))
 
     try:
-        run_signal(force=True)
+        run_signal(
+            force=True,
+            offset=variant["offset"],
+            active_path=active_path,
+            variant_label=vid,
+            paper_only=variant["paper_only"],
+            save_signal=(vid == "3L-50"),
+        )
     except Exception as exc:
-        logger.error("AUTO-ENTRY: run_signal() failed: {}", exc)
-        send_telegram(f"NIFTY WEEKLY OPTIONS - AUTO-ENTRY FAILED\nrun_signal() raised: {exc}")
+        logger.error("[{}] AUTO-ENTRY: run_signal() failed: {}", vid, exc)
+        send_telegram(f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\nrun_signal() raised: {exc}")
         return
 
-    pos = _read_active_position()
+    pos = _read_active_position(active_path)
     if not pos or pos.get("status") != "open":
-        logger.warning("AUTO-ENTRY: active_options_position.json not open after run_signal — aborting")
+        logger.warning("[{}] AUTO-ENTRY: active position file not open after run_signal — aborting", vid)
         send_telegram(
-            "NIFTY WEEKLY OPTIONS - AUTO-ENTRY FAILED\n"
-            "active_options_position.json was not left in an open state after signal — "
+            f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n"
+            "Active position file was not left in an open state after signal — "
             "check Dhan API / security ID resolution."
         )
         return
@@ -541,32 +603,39 @@ def _try_auto_entry(cfg: dict, collector: LtpCollector, fired: dict[str, date]) 
     contracts = pos.get("contracts", [])
     expected = [(int(c["strike"]), str(c["option_type"])) for c in contracts]
     if len(expected) != 6:
-        logger.warning("AUTO-ENTRY: expected 6 contracts, got {} — aborting", len(expected))
+        logger.warning("[{}] AUTO-ENTRY: expected 6 contracts, got {} — aborting", vid, len(expected))
         send_telegram(
-            f"NIFTY WEEKLY OPTIONS - AUTO-ENTRY FAILED\n"
-            f"Expected 6 resolved contracts, got {len(expected)}. No paper position opened."
+            f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n"
+            f"Expected 6 resolved contracts, got {len(expected)}. No position opened."
         )
         return
+
+    # Give this variant its own dedicated feed, independent of the strike-band monitor.
+    _subscribe_variant_legs(variant, pos)
 
     ltps = collector.wait_for(expected, _ENTRY_LTP_TIMEOUT_S)
     if any(v is None for v in ltps):
         ready = sum(1 for v in ltps if v is not None)
-        logger.warning("AUTO-ENTRY: only {}/6 leg LTPs arrived within {}s — aborting",
-                        ready, _ENTRY_LTP_TIMEOUT_S)
+        logger.warning("[{}] AUTO-ENTRY: only {}/6 leg LTPs arrived within {}s — aborting",
+                        vid, ready, _ENTRY_LTP_TIMEOUT_S)
         send_telegram(
-            f"NIFTY WEEKLY OPTIONS - AUTO-ENTRY FAILED\n"
+            f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n"
             f"Only {ready}/6 leg LTPs received within {_ENTRY_LTP_TIMEOUT_S // 60} minutes "
-            f"of signal. No paper position opened — check tick_service / P2 status."
+            f"of signal. No position opened — check tick_service / P2 status."
         )
         return
 
     atm  = int(pos["atm"])
     spot = float(pos["entry_spot"])
     try:
-        record = paper_trade.log_entry(atm=atm, legs_ltps=ltps, entry_spot=spot)
+        record = paper_trade.log_entry(
+            atm=atm, legs_ltps=ltps, entry_spot=spot,
+            offset=variant["offset"], active_path=active_path,
+            journal_path=journal_path, ladder_id=vid,
+        )
     except Exception as exc:
-        logger.error("AUTO-ENTRY: log_entry() failed: {}", exc)
-        send_telegram(f"NIFTY WEEKLY OPTIONS - AUTO-ENTRY FAILED\nlog_entry() raised: {exc}")
+        logger.error("[{}] AUTO-ENTRY: log_entry() failed: {}", vid, exc)
+        send_telegram(f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\nlog_entry() raised: {exc}")
         return
 
     total_premium = sum(ltps)
@@ -574,24 +643,28 @@ def _try_auto_entry(cfg: dict, collector: LtpCollector, fired: dict[str, date]) 
     rs_collected = total_premium * lot_size
 
     leg_lines = [f"  {expected[i][0]:<8} {expected[i][1]:<3} @ {ltps[i]:.2f}" for i in range(6)]
+    paper_tag = " [PAPER ONLY -- DO NOT PLACE REAL ORDERS]" if variant["paper_only"] else ""
+    action_line = "Legs sold (SELL 1 lot each):" if not variant["paper_only"] else \
+        "Legs tracked (paper SELL 1 lot each -- no real orders):"
     msg = "\n".join([
-        "NIFTY WEEKLY OPTIONS - 3L STRADDLE OPENED",
+        f"NIFTY WEEKLY OPTIONS [{vid}] - 3L STRADDLE OPENED{paper_tag}",
         f"Entry : {now.strftime('%Y-%m-%d %H:%M')} IST",
         f"Expiry: {record['expiry_date']}",
         f"Spot  : {spot:.2f}  |  ATM: {atm}",
         "",
-        "Legs sold (SELL 1 lot each):",
+        action_line,
         *leg_lines,
         "",
         f"Total premium collected: {total_premium:.2f} pts = Rs {rs_collected:,.0f}",
     ])
     send_telegram(msg)
-    logger.info("AUTO-ENTRY complete | ATM={} premium={:.2f} pts Rs={:.0f}",
-                atm, total_premium, rs_collected)
+    logger.info("[{}] AUTO-ENTRY complete | ATM={} premium={:.2f} pts Rs={:.0f}",
+                vid, atm, total_premium, rs_collected)
 
 
-def _try_auto_exit(cfg: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
-    if not cfg.get("auto_exit"):
+def _try_auto_exit(cfg: dict, variant: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
+    vid = variant["id"]
+    if not _variant_exit_enabled(cfg, variant):
         return
     now = _ist_now()
     try:
@@ -601,17 +674,20 @@ def _try_auto_exit(cfg: dict, collector: LtpCollector, fired: dict[str, date]) -
 
     if not (now.hour > xh or (now.hour == xh and now.minute >= xm)):
         return
-    if fired.get("exit") == now.date():
+    if fired.get(f"exit_{vid}") == now.date():
         return
 
-    pos = _read_active_position()
+    active_path = variant["active_path"]
+    journal_path = _journal_path_for(variant)
+
+    pos = _read_active_position(active_path)
     if not pos or pos.get("status") != "open":
         return
     if pos.get("expiry_date") != str(now.date()):
         return
 
-    fired["exit"] = now.date()
-    logger.info("AUTO-EXIT triggered at {} IST", now.strftime("%H:%M:%S"))
+    fired[f"exit_{vid}"] = now.date()
+    logger.info("[{}] AUTO-EXIT triggered at {} IST", vid, now.strftime("%H:%M:%S"))
 
     contracts = pos.get("contracts", [])
     expected = [(int(c["strike"]), str(c["option_type"])) for c in contracts]
@@ -622,23 +698,26 @@ def _try_auto_exit(cfg: dict, collector: LtpCollector, fired: dict[str, date]) -
     ltps = [v if v is not None else 0.05 for v in ltps_raw]
     missing = sum(1 for v in ltps_raw if v is None)
     if missing:
-        logger.warning("AUTO-EXIT: {}/6 legs had no LTP by deadline — using Rs 0.05 fallback", missing)
+        logger.warning("[{}] AUTO-EXIT: {}/6 legs had no LTP by deadline — using Rs 0.05 fallback",
+                        vid, missing)
 
     try:
-        rec = paper_trade.log_exit(ltps)
+        rec = paper_trade.log_exit(ltps, active_path=active_path, journal_path=journal_path)
     except Exception as exc:
-        logger.error("AUTO-EXIT: log_exit() failed: {}", exc)
-        send_telegram(f"NIFTY WEEKLY OPTIONS - AUTO-EXIT FAILED\nlog_exit() raised: {exc}")
+        logger.error("[{}] AUTO-EXIT: log_exit() failed: {}", vid, exc)
+        send_telegram(f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-EXIT FAILED\nlog_exit() raised: {exc}")
         return
 
     net_pnl = rec.get("net_pnl_rs")
     outcome = rec.get("outcome", "?")
     leg_lines = [f"  {expected[i][0]:<8} {expected[i][1]:<3} @ {ltps[i]:.2f}" for i in range(6)]
+    paper_tag = " [PAPER ONLY]" if variant["paper_only"] else ""
+    action_line = "Legs bought back:" if not variant["paper_only"] else "Legs tracked (paper buyback):"
     msg = "\n".join([
-        "NIFTY WEEKLY OPTIONS - 3L STRADDLE CLOSED (expiry day)",
+        f"NIFTY WEEKLY OPTIONS [{vid}] - 3L STRADDLE CLOSED (expiry day){paper_tag}",
         f"Exit: {now.strftime('%Y-%m-%d %H:%M')} IST",
         "",
-        "Legs bought back:",
+        action_line,
         *leg_lines,
         "",
         f"Entry premium : {rec.get('total_entry_premium', 0):.2f} pts",
@@ -646,7 +725,7 @@ def _try_auto_exit(cfg: dict, collector: LtpCollector, fired: dict[str, date]) -
         f"Net P&L       : Rs {net_pnl:+,.0f}  ({outcome})" if net_pnl is not None else "Net P&L: n/a",
     ])
     send_telegram(msg)
-    logger.info("AUTO-EXIT complete | outcome={} net_pnl_rs={}", outcome, net_pnl)
+    logger.info("[{}] AUTO-EXIT complete | outcome={} net_pnl_rs={}", vid, outcome, net_pnl)
 
 
 def main() -> None:
@@ -689,8 +768,9 @@ def main() -> None:
         while True:
             cfg = _read_cfg()
             if cfg:
-                _try_auto_entry(cfg, collector, fired)
-                _try_auto_exit(cfg, collector, fired)
+                for variant in LADDER_VARIANTS:
+                    _try_auto_entry(cfg, variant, collector, fired)
+                    _try_auto_exit(cfg, variant, collector, fired)
 
             pos = _read_active_position()
             if not (pos and pos.get("status") == "open"):

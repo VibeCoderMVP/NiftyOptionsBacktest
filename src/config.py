@@ -55,6 +55,28 @@ def lot_size_for_date(d: date) -> int:
 REGIME_CHANGE_DATE = date(2025, 9, 1)
 
 
+# ── Forward-test ladder variants (added 2026-07-21) ──────────────────────────
+# 3L-50 is the live config (unchanged paths/behavior). 3L-100 is a parallel
+# paper-only track for the wider ladder validated in the offline backtest
+# (see D:\Trading\NiftyOptionsBacktest\data\LADDER_WIDTH_50_VS_100_REPORT.md).
+LADDER_VARIANTS = [
+    {
+        "id": "3L-50",
+        "offset": 50,
+        "paper_only": False,
+        "active_path": Path(r"D:\Trading\active_options_position.json"),
+        "journal_filename": "options_journal.jsonl",
+    },
+    {
+        "id": "3L-100",
+        "offset": 100,
+        "paper_only": True,
+        "active_path": Path(r"D:\Trading\active_options_position_3l100.json"),
+        "journal_filename": "options_journal_3l100.jsonl",
+    },
+]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
