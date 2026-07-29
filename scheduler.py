@@ -76,12 +76,13 @@ import zmq
 from loguru import logger
 
 from src import paper_trade
-from src.config import LADDER_VARIANTS, settings
+from src.config import LADDER_VARIANTS, lot_size_for_date, settings
 from src.dhan_instruments import resolve_option_ids
 from src.signal import (
     ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, current_or_next_expiry_tuesday,
     get_nifty_open, get_nifty_spot, run_signal, send_telegram,
 )
+from trading_core.session_shutdown import NSE_SESSION_END, should_end_session
 from trading_core.subscription_registry import request_subscription
 
 _IST = timedelta(hours=5, minutes=30)
@@ -639,7 +640,7 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         return
 
     total_premium = sum(ltps)
-    lot_size = record.get("lot_size", 75)
+    lot_size = record.get("lot_size") or lot_size_for_date(date.fromisoformat(record["expiry_date"]))
     rs_collected = total_premium * lot_size
 
     leg_lines = [f"  {expected[i][0]:<8} {expected[i][1]:<3} @ {ltps[i]:.2f}" for i in range(6)]
@@ -788,6 +789,12 @@ def main() -> None:
             if now_mono - last_hb >= _HEARTBEAT_INTERVAL:
                 _write_heartbeat(started_at)
                 last_hb = now_mono
+
+            if should_end_session(NSE_SESSION_END):
+                logger.info(
+                    "SESSION_END | wall-clock reached {} — exiting for the day", NSE_SESSION_END,
+                )
+                break
 
             time.sleep(30)
     except KeyboardInterrupt:
