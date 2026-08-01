@@ -7,6 +7,8 @@ from pathlib import Path
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from trading_core.paths import fleet_path
+
 
 # ── Dhan constants ────────────────────────────────────────────────────────────
 NIFTY_SECURITY_ID = "13"         # Nifty 50 underlying in NSE_FNO
@@ -64,14 +66,14 @@ LADDER_VARIANTS = [
         "id": "3L-50",
         "offset": 50,
         "paper_only": False,
-        "active_path": Path(r"D:\Trading\active_options_position.json"),
+        "active_path": fleet_path("active_options_position.json"),
         "journal_filename": "options_journal.jsonl",
     },
     {
         "id": "3L-100",
         "offset": 100,
         "paper_only": True,
-        "active_path": Path(r"D:\Trading\active_options_position_3l100.json"),
+        "active_path": fleet_path("active_options_position_3l100.json"),
         "journal_filename": "options_journal_3l100.jsonl",
     },
 ]

@@ -2,7 +2,9 @@
 import json
 from pathlib import Path
 
-ACTIVE_PATH = Path(r"D:\Trading\active_options_position.json")
+from trading_core.paths import fleet_path
+
+ACTIVE_PATH = fleet_path("active_options_position.json")
 
 CORRECT_SIDS = {
     (24000, "CE"): "71472",

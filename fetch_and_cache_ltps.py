@@ -21,9 +21,10 @@ from dotenv import load_dotenv
 load_dotenv(TW / ".env")
 
 from brokers.dhan import DhanBroker
+from trading_core.paths import fleet_path
 
-ACTIVE_PATH = Path(r"D:\Trading\active_options_position.json")
-LTP_CACHE   = Path(r"D:\Trading\options_ltp_cache.json")
+ACTIVE_PATH = fleet_path("active_options_position.json")
+LTP_CACHE   = fleet_path("options_ltp_cache.json")
 
 CONTRACTS = [
     {"strike": 24000, "option_type": "CE", "security_id": "71472", "entry_ltp": 158.35},

@@ -20,8 +20,9 @@ from rich.console import Console
 from rich.table import Table
 
 from src.config import DHAN_API_BASE, NIFTY_LOT_SIZE, NIFTY_SECURITY_ID, settings
+from trading_core.paths import fleet_path
 
-ACTIVE_OPTIONS_PATH = Path(r"D:\Trading\active_options_position.json")
+ACTIVE_OPTIONS_PATH = fleet_path("active_options_position.json")
 
 truststore.inject_into_ssl()
 console = Console()

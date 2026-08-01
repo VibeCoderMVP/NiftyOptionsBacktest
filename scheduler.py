@@ -82,11 +82,12 @@ from src.signal import (
     ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, current_or_next_expiry_tuesday,
     get_nifty_open, get_nifty_spot, run_signal, send_telegram,
 )
+from trading_core.paths import fleet_path
 from trading_core.session_shutdown import NSE_SESSION_END, should_end_session
 from trading_core.subscription_registry import request_subscription
 
 _IST = timedelta(hours=5, minutes=30)
-_CONFIG_PATH   = Path(r"D:\Trading\options_config.json")
+_CONFIG_PATH   = fleet_path("options_config.json")
 _HEARTBEAT_PATH = _PROJECT_DIR / "data" / "scheduler_heartbeat.json"
 _HEARTBEAT_INTERVAL = 60
 

@@ -44,11 +44,13 @@ import zmq
 from dotenv import load_dotenv
 from loguru import logger
 
+from trading_core.paths import fleet_path
+
 load_dotenv(Path(__file__).resolve().parent / ".env")
 truststore.inject_into_ssl()
 
 ACTIVE_OPTIONS_PATH = Path(
-    os.environ.get("ACTIVE_OPTIONS_PATH", r"D:\Trading\active_options_position.json")
+    os.environ.get("ACTIVE_OPTIONS_PATH", str(fleet_path("active_options_position.json")))
 )
 ZMQ_PORT   = int(os.environ.get("ZMQ_OPTIONS_PORT", 5557))
 POLL_SECS  = float(os.environ.get("OPTIONS_POLL_SECS", 15))

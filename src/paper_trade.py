@@ -23,8 +23,9 @@ from rich.table import Table
 import os
 
 from src.config import NIFTY_LOT_SIZE, settings
+from trading_core.paths import fleet_path
 
-ACTIVE_OPTIONS_PATH = Path(os.environ.get("ACTIVE_OPTIONS_PATH", r"D:\Trading\active_options_position.json"))
+ACTIVE_OPTIONS_PATH = Path(os.environ.get("ACTIVE_OPTIONS_PATH", str(fleet_path("active_options_position.json"))))
 
 console = Console()
 
