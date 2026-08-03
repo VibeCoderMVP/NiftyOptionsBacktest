@@ -5,7 +5,7 @@
 Two things in one repo:
 
 1. **Historical backtest** — Nifty weekly options theta-decay harvest strategy using Dhan's paid `POST /charts/rollingoption` API. DuckDB + Parquet storage.
-2. **Live forward testing** — entry signal now at 15:10 Thursday (moved from 15:20, see note below), paper trade journal, live LTP tracking via tick_service ZMQ, EasyTerminal Options tab display.
+2. **Live forward testing** — entry AND exit signal now at 15:10 Thursday/Tuesday (both moved earlier, see note below), paper trade journal, live LTP tracking via tick_service ZMQ, EasyTerminal Options tab display.
 
 **`entry_time_ist` moved from "15:20" to "15:10" in `D:\Trading\options_config.json`,
 2026-08-03 — NSE's Closing Auction Session (CAS) went live that day.** Directly confirmed
@@ -13,14 +13,26 @@ Two things in one repo:
 freezes completely from 15:15 to roughly 15:29, then jumps ~200 points in one step — this
 project's ATM/strike-selection spot fetch (`get_nifty_spot()`, used to build the SELL order
 slip for the LIVE `3L-50` ladder) was firing at 15:20, squarely inside that frozen/jump
-window. `exit_time_ist` ("15:25") was deliberately left unchanged — `_try_auto_exit()` only
-reads option-leg buyback LTPs (`collector.wait_for(...)`), never spot, and those legs were
-independently confirmed to keep trading normally through the whole CAS window (a 24600 CE
-strike's LTP/OI moved continuously 15:10→15:19+ today, unaffected). This also happens to
-align the automated scheduler with the manual `SIGNAL.bat` path's own pre-existing 15:10
+window.
+
+**`exit_time_ist` ALSO moved, from "15:25" to "15:10", same evening, for a DIFFERENT
+reason.** Initially left unchanged (`_try_auto_exit()` only reads option-leg buyback LTPs,
+never spot, and those legs were independently confirmed to keep trading normally through
+the whole CAS window — a 24600 CE strike's LTP/OI moved continuously 15:10→15:19+ that day,
+unaffected). But the user separately supplied broker RMS's own revised auto-square-off
+schedule: index & stock F&O contracts now get auto-squared-off by the broker at
+**15:25-15:26** (even though exchange F&O trading itself runs to 15:40) — exactly the old
+`exit_time_ist` value. That put the planned manual buyback (`EXIT.bat`, prompting for
+buyback LTPs) in a direct race against the broker's own RMS: whichever acts first
+determines the real fill price on the LIVE `3L-50` ladder, not necessarily the user's own
+choice. Moved to `"15:10"` for a genuine ~15min safety margin before that window —
+`_EXIT_LTP_TIMEOUT_S` is only 120s (legs have been ticking all week, no long wait needed),
+so this costs a small amount of theta-decay harvest, not execution risk. This ALSO happens
+to align the automated scheduler with the manual `SIGNAL.bat` path's own pre-existing 15:10
 timing guard (see "Thursday 15:10-15:20 IST" below), which was never actually in sync with
-the scheduler's old 15:20 default. See `D:\Trading\NSE_CAS_2026_IMPACT_FINDINGS.md` for the
-full investigation.
+the scheduler's old 15:20 entry default before today. See
+`D:\Trading\NSE_CAS_2026_IMPACT_FINDINGS.md` §7 and §9 for the full investigation (§9 has
+the complete broker auto-square-off table by segment).
 
 **Read STRATEGY.md first** for strategy context. This file is project mechanics only.
 
@@ -43,7 +55,7 @@ Both are always exactly 3 strikes x CE+PE = 6 legs — only the strike offset di
 correlation) but a meaningfully calmer left tail (max loss Rs -4,346 vs -7,792 in tue_expiry) —
 too promising to ignore, too thin a sample (26 weeks) to switch the live ladder on. 3L-100
 therefore runs as a second always-on **paper-only** track inside the same `scheduler.py`
-process, same 15:20/15:25 clock, writing to its own separate active-position/journal files so
+process, same entry/exit clock (both 15:10 as of 2026-08-03), writing to its own separate active-position/journal files so
 neither variant's state machine can collide with the other's.
 
 `src/signal.py::build_order_slip`/`write_active_position`/`run_signal` and
@@ -105,7 +117,8 @@ Or manually: `uv run python pipeline.py signal [--spot 24178] [--force]`
 
 **Timing guard:** If run before 15:10 IST on Thursday, blocks in a countdown loop and fires automatically at 15:10. After 15:35 warns about stale spot but proceeds.
 
-### Thursday 15:25-15:28 IST (after placing SELL orders)
+### Thursday 15:10-15:15 IST (after placing SELL orders) — window moved earlier 2026-08-03,
+see the CAS/broker-RMS note near the top of this file; was "15:25-15:28"
 
 ```
 ENTRY.bat           — prompts for 6 fill LTPs, logs to options_journal.jsonl,
@@ -125,7 +138,14 @@ START_OPTIONS_LTP.bat    — REST polling fallback (15s cadence, ZMQ port 5557)
 
 EasyTerminal Options tab (F4) shows live LTPs + unrealized P&L automatically.
 
-### Tuesday 15:20-15:28 IST (buying back all 6 legs)
+### Tuesday 15:20-15:28 IST (buying back all 6 legs) — NOTE: this manual path's own
+timing guard (below) still hardcodes 15:20 in `pipeline.py`, NOT read from
+`options_config.json`'s `exit_time_ist` (which moved to 15:10 2026-08-03 — see the CAS/
+broker-RMS note near the top of this file). The automated scheduler (`scheduler.py`,
+"Auto-Pilot" section below) now exits at 15:10; this manual/backup path was NOT updated in
+the same pass and still targets 15:20 — flagged here as a known inconsistency, not yet
+fixed, since 15:20 also now sits close to the 15:25-15:26 broker F&O auto-square-off
+window with less margin than the automated path gets.
 
 ```
 EXIT.bat            — prompts for 6 buyback prices, logs exit, computes P&L,
@@ -134,7 +154,7 @@ EXIT.bat            — prompts for 6 buyback prices, logs exit, computes P&L,
 
 Or manually: `uv run python pipeline.py paper-exit <ltp1> <ltp2> <ltp3> <ltp4> <ltp5> <ltp6>`
 
-**Timing guard:**
+**Timing guard (hardcoded in `pipeline.py`, not yet aligned with the 2026-08-03 change):**
 - Before expiry day → asks `Exit early? (Y/N)`. N = aborts. Y = exits now.
 - Expiry day before 15:20 → asks `Exit early? (Y/N)`. N = blocks in wait loop until 15:20.
 - Expiry day at/after 15:20 → proceeds immediately.
@@ -161,7 +181,8 @@ in this codebase (TW's P1/P2/P3, each strategy's monitor.py):
   total premium collected (previously missing — the order-slip alert from `run_signal()`
   only has the *proposed* legs, not the actual fill premiums).
 - **Auto-exit:** position open, `expiry_date == today`, at/after `exit_time_ist` (default
-  15:25) → same LTP wait (shorter timeout — legs have been ticking all week) →
+  15:10, moved from 15:25 2026-08-03 — see the CAS/broker-RMS note near the top of this
+  file) → same LTP wait (shorter timeout — legs have been ticking all week) →
   `paper_trade.log_exit()` → Telegram exit summary (entry/exit premium, net P&L). A leg with
   no LTP by the deadline falls back to Rs 0.05 (matches ET's own force-close convention).
 - **Force-close:** still available via ET's Options tab (`C` key) for a manual early exit —
@@ -179,8 +200,9 @@ in this codebase (TW's P1/P2/P3, each strategy's monitor.py):
     cumulative premium every cycle. Purely a dry run — **never** writes
     active_options_position.json/options_journal.jsonl, never sends Telegram.
     Skips Sat/Sun (`today.weekday() >= 5`).
-  - **While a position is open** (Thu 15:25 through Tue 15:25): same cadence, prints the
-    real position's current cumulative premium. Still terminal-only; the actual exit still
+  - **While a position is open** (Thu 15:10 through Tue 15:10, as of 2026-08-03): same
+    cadence, prints the real position's current cumulative premium. Still terminal-only;
+    the actual exit still
     goes through `_try_auto_exit` above.
 
   **Rewritten 2026-07-07 — both the Nifty spot/open fetch AND all premium reads are now

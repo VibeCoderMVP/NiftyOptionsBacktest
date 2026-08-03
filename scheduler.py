@@ -82,6 +82,7 @@ from src.signal import (
     ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, current_or_next_expiry_tuesday,
     get_nifty_open, get_nifty_spot, run_signal, send_telegram,
 )
+from trading_core.market_structure import FO_TRADING_DECISION_CUTOFF
 from trading_core.paths import fleet_path
 from trading_core.session_shutdown import NSE_SESSION_END, should_end_session
 from trading_core.subscription_registry import request_subscription
@@ -555,9 +556,9 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         return
     now = _ist_now()
     try:
-        eh, em = (int(x) for x in cfg.get("entry_time_ist", "15:20").split(":"))
+        eh, em = (int(x) for x in cfg.get("entry_time_ist", FO_TRADING_DECISION_CUTOFF).split(":"))
     except Exception:
-        eh, em = 15, 20
+        eh, em = (int(x) for x in FO_TRADING_DECISION_CUTOFF.split(":"))
     entry_weekday = int(cfg.get("entry_weekday", 3))
 
     if now.weekday() != entry_weekday:
@@ -670,9 +671,9 @@ def _try_auto_exit(cfg: dict, variant: dict, collector: LtpCollector, fired: dic
         return
     now = _ist_now()
     try:
-        xh, xm = (int(x) for x in cfg.get("exit_time_ist", "15:25").split(":"))
+        xh, xm = (int(x) for x in cfg.get("exit_time_ist", FO_TRADING_DECISION_CUTOFF).split(":"))
     except Exception:
-        xh, xm = 15, 25
+        xh, xm = (int(x) for x in FO_TRADING_DECISION_CUTOFF.split(":"))
 
     if not (now.hour > xh or (now.hour == xh and now.minute >= xm)):
         return
