@@ -5,7 +5,22 @@
 Two things in one repo:
 
 1. **Historical backtest** — Nifty weekly options theta-decay harvest strategy using Dhan's paid `POST /charts/rollingoption` API. DuckDB + Parquet storage.
-2. **Live forward testing** — entry signal at 15:20 Thursday, paper trade journal, live LTP tracking via tick_service ZMQ, EasyTerminal Options tab display.
+2. **Live forward testing** — entry signal now at 15:10 Thursday (moved from 15:20, see note below), paper trade journal, live LTP tracking via tick_service ZMQ, EasyTerminal Options tab display.
+
+**`entry_time_ist` moved from "15:20" to "15:10" in `D:\Trading\options_config.json`,
+2026-08-03 — NSE's Closing Auction Session (CAS) went live that day.** Directly confirmed
+(via TW's `option_chain_service.py` real poll history) that NIFTY's reported spot value
+freezes completely from 15:15 to roughly 15:29, then jumps ~200 points in one step — this
+project's ATM/strike-selection spot fetch (`get_nifty_spot()`, used to build the SELL order
+slip for the LIVE `3L-50` ladder) was firing at 15:20, squarely inside that frozen/jump
+window. `exit_time_ist` ("15:25") was deliberately left unchanged — `_try_auto_exit()` only
+reads option-leg buyback LTPs (`collector.wait_for(...)`), never spot, and those legs were
+independently confirmed to keep trading normally through the whole CAS window (a 24600 CE
+strike's LTP/OI moved continuously 15:10→15:19+ today, unaffected). This also happens to
+align the automated scheduler with the manual `SIGNAL.bat` path's own pre-existing 15:10
+timing guard (see "Thursday 15:10-15:20 IST" below), which was never actually in sync with
+the scheduler's old 15:20 default. See `D:\Trading\NSE_CAS_2026_IMPACT_FINDINGS.md` for the
+full investigation.
 
 **Read STRATEGY.md first** for strategy context. This file is project mechanics only.
 
@@ -139,7 +154,8 @@ open**. Run it continuously (`START_SCHEDULER.bat`), same as any other always-on
 in this codebase (TW's P1/P2/P3, each strategy's monitor.py):
 
 - **Auto-entry:** configured weekday (default Thursday) at/after `entry_time_ist` (default
-  15:20), no open position → calls `run_signal(force=True)` in-process (no subprocess —
+  15:10, moved from 15:20 2026-08-03 — see the NSE CAS note near the top of this file), no
+  open position → calls `run_signal(force=True)` in-process (no subprocess —
   same venv) → subscribes to ZMQ port 5555/5557 itself and waits (up to 6 min) for all 6
   leg LTPs → `paper_trade.log_entry()` → sends a **new** Telegram message with the confirmed
   total premium collected (previously missing — the order-slip alert from `run_signal()`
@@ -338,7 +354,7 @@ One JSON object per line. `outcome: null` = still open.
   "entry_time": "2026-06-26 15:21",
   "entry_spot": 24050.0,
   "atm_strike": 24050,
-  "lot_size": 75,
+  "lot_size": 65,
   "lots": 1,
   "legs": [
     {"strike": 24000, "type": "CE", "entry_ltp": 158.35, "exit_ltp": null, "exit_time": null},
@@ -378,9 +394,14 @@ Brokerage: Rs 20/leg/side × 6 legs × 2 sides = Rs 240/trade.
 
 **Lot size history:**
 - Pre Nov 20, 2024: 25 shares/lot
-- Nov 20, 2024+: 75 shares/lot (SEBI F&O reform)
+- Nov 20, 2024 – Jan 5, 2026: 75 shares/lot (SEBI F&O reform)
+- Jan 6, 2026+: 65 shares/lot (NSE index derivatives lot size revision)
 
-`NIFTY_LOT_SIZE = 75` in config.py. Historical backtest adjusts for pre-reform lots.
+`NIFTY_LOT_SIZE = 65` in config.py; `lot_size_for_date(expiry_date)` is the source of truth
+used by every write site (`log_entry`/`log_exit`/scheduler.py) — see
+`bug_niftyoptions_lot_size_jan2026_revision` memory for the 2026-07-28 incident where a
+write site read the raw constant instead of the table and went stale for ~7 months across
+this same revision.
 
 ---
 
