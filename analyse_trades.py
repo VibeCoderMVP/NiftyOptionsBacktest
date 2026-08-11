@@ -17,7 +17,7 @@ from rich import box
 console = Console()
 
 WEEKLY_DIR  = Path("data/options/weekly")
-LOT_SIZE    = 75
+LOT_SIZE    = 65  # all TARGETS below are 2026 dates, post Jan 6 2026 lot-size revision
 BROKERAGE   = 20.0 * 6   # Rs per lot for 3L (6 legs)
 
 # Target cycles: (entry_date, label, note)

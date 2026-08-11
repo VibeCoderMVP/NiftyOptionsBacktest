@@ -22,7 +22,7 @@ from rich.table import Table
 
 import os
 
-from src.config import NIFTY_LOT_SIZE, settings
+from src.config import lot_size_for_date, settings
 from trading_core.paths import fleet_path
 
 ACTIVE_OPTIONS_PATH = Path(os.environ.get("ACTIVE_OPTIONS_PATH", str(fleet_path("active_options_position.json"))))
@@ -95,7 +95,7 @@ def log_entry(
     entry_date  = entry_date or _ist_now().date()
     expiry_date = _next_tuesday(entry_date)
     entry_time  = _ist_now().strftime("%Y-%m-%d %H:%M")
-    lot_size    = NIFTY_LOT_SIZE
+    lot_size    = lot_size_for_date(expiry_date)
 
     strikes = [atm - offset, atm - offset, atm, atm, atm + offset, atm + offset]
     types   = ["CE", "PE", "CE", "PE", "CE", "PE"]
@@ -182,7 +182,7 @@ def log_exit(
 
     rec      = records[open_idx]
     exit_t   = exit_time or _ist_now().strftime("%Y-%m-%d %H:%M")
-    lot_size = rec.get("lot_size", NIFTY_LOT_SIZE)
+    lot_size = rec.get("lot_size") or lot_size_for_date(date.fromisoformat(rec["expiry_date"]))
     lots     = rec.get("lots", 1)
 
     for i, leg in enumerate(rec["legs"]):

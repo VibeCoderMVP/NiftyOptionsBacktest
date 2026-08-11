@@ -29,16 +29,20 @@ STRIKE_STEP = 50   # points per strike
 # 0 = ATM only (1-ladder), 1 = ATM±50 (3-ladder), 2 = ATM±100 (5-ladder)
 LADDER_OFFSETS = [0, STRIKE_STEP, 2 * STRIKE_STEP]   # [0, 50, 100]
 
-# Current Nifty lot size (post SEBI F&O reform, effective Nov 20, 2024)
-NIFTY_LOT_SIZE = 75
+# Current Nifty lot size (post Jan 2026 NSE index-derivatives lot size revision)
+NIFTY_LOT_SIZE = 65
 
-# Lot size history — SEBI revised Nifty lot sizes as index levels changed.
+# Lot size history — SEBI/NSE revised Nifty lot sizes as index levels changed.
 #   Jan 2023 – Nov 19, 2024 : 25 shares/lot
-#   Nov 20, 2024 onwards    : 75 shares/lot (SEBI F&O reform, minimum contract value increase)
-# Source: NSE contract specification archives + SEBI circular Oct 1, 2024.
+#   Nov 20, 2024 – Jan 5, 2026 : 75 shares/lot (SEBI F&O reform, minimum contract value increase)
+#   Jan 6, 2026 onwards     : 65 shares/lot (NSE index derivatives lot size revision,
+#                             weekly contracts effective Jan 6 2026 / monthly Jan 27 2026)
+# Source: NSE contract specification archives + NSE circular (index derivatives lot size
+# revision, effective Jan 2026).
 _LOT_SIZE_HISTORY = [
     (date(2023, 1, 1),  25),
     (date(2024, 11, 20), 75),
+    (date(2026, 1, 6),  65),
 ]
 
 

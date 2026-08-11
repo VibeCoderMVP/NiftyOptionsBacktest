@@ -354,7 +354,7 @@ Press `C` on Options tab → modal shows current per-leg live LTPs → confirm w
   "entry_time": "2026-06-26 15:21",
   "entry_spot": 24050.0,
   "atm_strike": 24050,
-  "lot_size": 75,
+  "lot_size": 65,
   "lots": 1,
   "legs": [
     {"strike": 24000, "type": "CE", "entry_ltp": 158.35, "exit_ltp": null, "exit_time": null},

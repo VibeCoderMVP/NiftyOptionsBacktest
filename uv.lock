@@ -608,6 +608,7 @@ name = "trading-core"
 version = "0.1.0"
 source = { editable = "../trading_core" }
 dependencies = [
+    { name = "certifi" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "python-dotenv" },
@@ -616,15 +617,24 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2024.0.0" },
+    { name = "dhanhq", marker = "extra == 'dhan'", specifier = ">=2.2.0" },
     { name = "duckdb", marker = "extra == 'data'", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pandas", marker = "extra == 'data'", specifier = ">=2.0" },
+    { name = "pyarrow", marker = "extra == 'data'", specifier = ">=25.0.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyzmq", marker = "extra == 'zmq'", specifier = ">=25" },
     { name = "truststore", specifier = ">=0.9" },
 ]
-provides-extras = ["zmq", "data"]
+provides-extras = ["zmq", "data", "dhan"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "dhanhq", specifier = ">=2.2.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
+]
 
 [[package]]
 name = "truststore"
