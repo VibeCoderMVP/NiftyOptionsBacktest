@@ -36,5 +36,6 @@ if errorlevel 1 (
     )
 )
 
-%UV_CMD% run python scheduler.py
+echo [PR-16] direct venv launch, no uv wrapper
+".venv\Scripts\python.exe" scheduler.py
 pause
