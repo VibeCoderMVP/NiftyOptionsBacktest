@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  syntax-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Byte-compile every .py file (syntax/import-statement smoke check)
+        # This project has no test suite of its own, and its trading-core
+        # sibling-repo path dependency (pyproject.toml's
+        # trading-core = { path = "../trading_core", editable = true }, where
+        # applicable) doesn't exist in this isolated single-repo checkout, so
+        # a real "does it import" or "does it run" check isn't possible here
+        # without either a PAT-secret cross-repo checkout or a real test
+        # suite -- neither exists yet (2026-08-27 fleet-wide CI rollout).
+        # compileall catches real syntax errors at zero dependency cost.
+        # .venv/__pycache__/data excluded: .venv won't exist in a fresh CI
+        # checkout (gitignored) but is excluded for safety/local-testing
+        # parity; data/ holds generated CSVs/DBs, never .py source.
+        run: python -m compileall -q -x '(\.venv|__pycache__|\.git|[\/]data[\/])' .
