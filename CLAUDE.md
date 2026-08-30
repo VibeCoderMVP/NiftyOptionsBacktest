@@ -495,3 +495,17 @@ before assuming it's a credentials problem.
 Repo: https://github.com/VibeCoderMVP/NiftyOptionsBacktest
 Branch: main
 Never push: .env, data/, .venv/
+
+## Signal Event Log (added 2026-08-31)
+
+`scheduler.py`'s two real success paths (`_try_auto_entry()`'s confirmed-fill summary,
+`_try_auto_exit()`'s confirmed-buyback summary) also append to
+`data/signal_events.jsonl` (labels `OPT-3L50`/`OPT-3L100`) via
+`trading_core.journal.append_event()` — feeds `LiveSignalDashboard`'s Flow tab.
+Structurally different from every other fleet project: calendar-scheduler-driven
+(Thursday/Tuesday wall-clock checks), not tick/bar-close-driven, so there is no
+`armed` concept at all — nothing is ever a resting order. The various "AUTO-ENTRY/EXIT
+FAILED" Telegram alerts and `src/signal.py::run_signal()`'s own proposed-order-slip
+alert are deliberately NOT wired — neither is a confirmed fill. See
+`STRATEGY_WIRING_PLAYBOOK.md`'s §6c for the full contract. **Requires
+`scheduler.py` to restart to take effect.**

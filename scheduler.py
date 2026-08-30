@@ -82,10 +82,29 @@ from src.signal import (
     ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, current_or_next_expiry_tuesday,
     get_nifty_open, get_nifty_spot, run_signal, send_telegram,
 )
+from trading_core.journal import append_event, build_event_record
 from trading_core.market_structure import FO_TRADING_DECISION_CUTOFF
 from trading_core.paths import fleet_path
 from trading_core.session_shutdown import NSE_SESSION_END, should_end_session
 from trading_core.subscription_registry import request_subscription
+
+# entry/exit flow log for LiveSignalDashboard's Flow tab (see D:\Trading\docs\
+# SIGNAL_EVENT_LOG_AND_LIVE_DASHBOARD_DESIGN.md) -- sole writer is this process (shared by
+# both ladder variants). Only the two REAL success paths (confirmed fill, confirmed
+# buyback) are wired -- the various "AUTO-ENTRY/EXIT FAILED" alerts above each call site
+# aren't real armed/entry/exit events (nothing filled), and run_signal()'s own proposed-
+# order-slip alert (src/signal.py) is informational only, not a confirmed fill -- neither
+# is forced into the 5-event vocabulary. No "armed" concept exists here at all: this
+# project is calendar-scheduler-driven (Thursday/Tuesday wall-clock checks), not tick/
+# bar-close-driven, so there's no resting/pending state between signal and fill.
+_SIGNAL_EVENTS_PATH = fleet_path("NiftyOptionsBacktest", "data", "signal_events.jsonl")
+_VID_TO_LABEL = {"3L-50": "OPT-3L50", "3L-100": "OPT-3L100"}
+
+
+def _log_event(event: str, vid: str, **fields) -> None:
+    label = _VID_TO_LABEL.get(vid, f"OPT-{vid}")
+    record = build_event_record(event=event, symbol="NIFTY", strategy=label, tf=None, **fields)
+    append_event(_SIGNAL_EVENTS_PATH, record)
 
 _IST = timedelta(hours=5, minutes=30)
 _CONFIG_PATH   = fleet_path("options_config.json")
@@ -663,6 +682,9 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
     send_telegram(msg)
     logger.info("[{}] AUTO-ENTRY complete | ATM={} premium={:.2f} pts Rs={:.0f}",
                 vid, atm, total_premium, rs_collected)
+    _log_event("entry", vid, atm=atm, entry_spot=spot, expiry_date=record["expiry_date"],
+               total_premium_pts=total_premium, rs_collected=rs_collected,
+               entry_time_str=now.strftime("%Y-%m-%d %H:%M"))
 
 
 def _try_auto_exit(cfg: dict, variant: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
@@ -729,6 +751,10 @@ def _try_auto_exit(cfg: dict, variant: dict, collector: LtpCollector, fired: dic
     ])
     send_telegram(msg)
     logger.info("[{}] AUTO-EXIT complete | outcome={} net_pnl_rs={}", vid, outcome, net_pnl)
+    _log_event("exit", vid, exit_reason=outcome, trigger="eod_forced",
+               entry_premium_pts=rec.get("total_entry_premium"),
+               exit_premium_pts=rec.get("total_exit_premium"), pnl=net_pnl,
+               exit_time_str=now.strftime("%Y-%m-%d %H:%M"))
 
 
 def main() -> None:
