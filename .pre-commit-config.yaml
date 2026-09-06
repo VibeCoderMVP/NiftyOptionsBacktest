@@ -1,0 +1,23 @@
+# Fleet-shared pre-commit config (CI-plan pass, 2026-09-06).
+# Runs on STAGED FILES ONLY (pre-commit's default) -- NEVER `pre-commit run --all-files`
+# (that mass-rewrites EOL/whitespace across the whole tree; .gitattributes handles
+# new/edited files instead, gradually). CI runs the same CONTRACT (ruff E9,F + a syntax
+# smoke) via a different runner, not these hooks.
+# After cloning:  pre-commit install
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff
+        args: [--select, "E9,F"]

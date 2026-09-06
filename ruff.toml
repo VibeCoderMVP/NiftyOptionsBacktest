@@ -1,0 +1,10 @@
+# Fleet-shared minimal ruff config (CI/CI-plan pass 2026-09-06). E9 = pycodestyle
+# syntax errors; F = pyflakes (undefined names, unused imports/vars, star imports).
+# No style rules (E1-E7), no import sorting (I), no reformatting -- deliberately a
+# real-bug-only filter. Broader rules are a per-repo opt-in later.
+target-version = "py311"
+line-length = 120
+extend-exclude = [".venv", "__pycache__", "data", "node_modules", ".git"]
+
+[lint]
+select = ["E9", "F"]
