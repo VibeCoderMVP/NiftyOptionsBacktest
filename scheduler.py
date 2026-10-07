@@ -763,6 +763,9 @@ def main() -> None:
                level="INFO")
     logger.add(_PROJECT_DIR / "data" / "scheduler.log", rotation="5 MB", retention="14 days", level="DEBUG")
 
+    from trading_core.single_instance import guard_or_exit  # dup-launch guard, 2026-10-07
+    guard_or_exit("scheduler", _PROJECT_DIR / "data", logger=logger)
+
     started_at = _ist_now().isoformat(timespec="seconds")
     _write_heartbeat(started_at)
     logger.info("Options scheduler started")
