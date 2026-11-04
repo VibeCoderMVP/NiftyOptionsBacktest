@@ -10,6 +10,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
+
+from src.backtest import cycle_exit_date
 from rich.console import Console
 from rich.table import Table
 from rich import box
@@ -74,6 +76,12 @@ def analyse_cycle(entry_date_str: str) -> dict | None:
 
     df = pd.read_parquet(pfile)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # The file is keyed by the nominal Tuesday; exit on the REAL (holiday-shifted) expiry
+    actual = cycle_exit_date(df)
+    if actual is None:
+        console.print(f"[red]{pfile.name} predates actual_expiry_date -- run pipeline.py build[/red]")
+        return None
+    expiry = date.fromisoformat(actual)
 
     atm  = int(df["atm_strike"].iloc[0])
     spot = float(df["entry_spot"].iloc[0])
@@ -89,10 +97,6 @@ def analyse_cycle(entry_date_str: str) -> dict | None:
     # Use ALL strikes on exit day to get the spot price, not just in_3L
     all_exit = last_bar(df, expiry)
     exit_bars = last_bar(legs_df, expiry)
-    if exit_bars.empty:
-        wed = expiry - timedelta(days=6)
-        exit_bars = last_bar(legs_df, wed)
-        all_exit  = last_bar(df, wed)
 
     if entry_bars.empty:
         return None
@@ -214,10 +218,9 @@ def main() -> None:
         all_results.append(result)
 
     for r in all_results:
-        outcome_color = "green" if r["outcome"] == "WIN" else "red"
         exit_spot_str = f"  Exit spot: {r['exit_spot']:.0f}" if r.get("exit_spot") else ""
         console.rule(
-            f"[bold]{r['label']}[/bold]  Entry: {r['entry']} (Thu)  ->  Expiry: {r['expiry']} (Tue)  |  "
+            f"[bold]{r['label']}[/bold]  Entry: {r['entry']} (Thu)  ->  Expiry: {r['expiry']} ({r['expiry']:%a})  |  "
             f"Entry spot: {r['spot']:.0f}  ATM: {r['atm']}{exit_spot_str}"
         )
         if r["note"]:

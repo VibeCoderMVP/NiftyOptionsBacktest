@@ -454,10 +454,14 @@ this same revision.
 longer compute expiry as "next Tuesday". `src/signal.py::listed_expiry()` picks the nearest
 NIFTY expiry actually listed in Dhan's instruments master (`dhan_instruments.
 list_option_expiries()`), so holiday-shifted weeks (e.g. Mon 2026-11-09, Mon 2026-11-23) resolve
-correctly; the Tuesday rule is only a logged fallback if the master can't be read. Before this,
+correctly. **There is no computed fallback (removed 2026-11-05):** if the master can't be read, or
+lists no expiry within 10 days, `listed_expiry()` raises and the entry fails with a clear
+reason. The IDs come from the same file, so a guessed date could never trade. Before this,
 the 2026-10-15 entry picked 2026-10-20 (not listed), aborted with 0/6 LTPs, and its ID-less
 `open` position file silently blocked the 10-22 and 10-29 entries for both ladders.
-`paper_trade.log_entry()` takes the journal's `expiry_date` from the active position file for
+`paper_trade.log_entry()` takes the journal's `expiry_date` from an explicit listed expiry
+(`pipeline.py paper-entry` passes `.last_signal.json`'s) or else from the active position file,
+and raises if neither exists; there is no `_next_tuesday()` any more. This is for
 the same reason.
 
 **Thursday-holiday entry shift (added 2026-11-04):** `scheduler.py::_entry_shift_today()`
@@ -492,7 +496,26 @@ ladder has no journal entry since then (machine off, no internet, every attempt 
 - **Unverified live:** the REST OHLC open at 09:16 has only been seen working off-hours. The
   entry log line records which source was used and the value, so check it on the first real use.
 
-**Holiday handling (backtest):** When expiry day is a market holiday, the backtest assumes expiry moved to the previous Wednesday (in 2026 NSE actually used the previous Monday for Tuesday holidays; the live path reads the real listing). `compute_cycle_pnl()` in backtest.py falls back to Wednesday if Thursday/Tuesday data is absent.
+**Real expiry in the backtest (fixed 2026-11-05):** the builder no longer assumes fixed
+weekdays. `builder._resolve_actual_expiries()` sets each cycle's `actual_expiry_date` to the
+last day that actually traded (any strike, in the rolling-option data) in
+(entry, nominal expiry]. NSE only moves a holiday expiry earlier: Thu->Wed, or Wed+Thu->Tue,
+in the old Fri->Thu series; Tue->Mon in the current Wed->Tue series.
+- `expiry_date` stays the nominal date and keys the parquet filename.
+- The holding window is every traded day from entry through the real expiry.
+- `compute_cycle_pnl()`, `ladder_width_compare.py` and `analyse_trades.py` all exit on
+  `actual_expiry_date` via `backtest.cycle_exit_date()`. The old "entry + 1 day" fallback,
+  which scored current-series holiday weeks as Thu->Fri trades, is gone.
+- **Unscorable, not guessed:** a cycle with no target-strike bars on its real expiry is
+  excluded and listed in a `UNSCORABLE` warning.
+- **Full ladders only:** a ladder is scored only when all its legs (1L=2, 3L=6, 5L=10) have
+  bars at both entry and exit. Before, a missing leg was silently dropped from the P&L.
+- **Caveat:** the excluded weeks are mostly big-move weeks, where strikes left the rolling
+  ATM+-4 range -- the weeks a short ladder loses on. So results still overstate SELL P&L
+  until those weeks are scored some other way (e.g. intrinsic value at the expiry close,
+  as `analyse_trades.py` already does per leg).
+- `pipeline.py build` automatically rebuilds any weekly parquet missing the
+  `actual_expiry_date` column.
 
 **Rolling data coverage gap:** When Nifty moves >200 pts during the week, entry strikes fall outside the ATM±4 relative range on exit day → exit LTP is absent. `analyse_trades.py` infers intrinsic value (`max(exit_spot - strike, 0.05)` for CE) from the exit-day spot price. These are marked with `*`.
 

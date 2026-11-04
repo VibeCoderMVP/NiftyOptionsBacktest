@@ -240,8 +240,10 @@ def cmd_paper_entry(extra_args: list[str], entry_date_str: str | None = None) ->
             legs_ltps  = leg_ltps,
             entry_spot = spot,
             entry_date = entry_date,
+            # the listed expiry the signal resolved -- never recomputed from the entry date
+            expiry_date = date.fromisoformat(sig["expiry_date"]) if sig.get("expiry_date") else None,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         console.print(f"[red]{exc}[/red]")
         sys.exit(1)
 

@@ -234,8 +234,11 @@ year's NSE F&O holiday list must be added there**, usually published mid-Decembe
 it there is no shift and no catch-up, and a Telegram alert asks for the list. See CLAUDE.md
 for the mechanics.
 
-**Backtest convention (unchanged):** when the expiry day is a holiday, `compute_cycle_pnl()`
-falls back to the preceding Wednesday's data if the Tuesday/Thursday data is absent.
+**Backtest (fixed 2026-11-05):** every cycle exits on its real expiry, the last day that
+actually traded on or before the nominal expiry, so holiday shifts (Thu->Wed, Wed+Thu->Tue,
+Tue->Mon) come from the data, not a rule. Cycles with no strike data on the real expiry, or
+with an incomplete ladder, are excluded rather than guessed. They skew toward big-move
+weeks, so SELL results remain optimistic. See CLAUDE.md "Real expiry in the backtest".
 
 **Public holidays to watch for Nifty options (check NSE calendar each year):**
 Republic Day, Holi, Ram Navami, Mahavir Jayanti, Good Friday, Eid, Independence Day, Ganesh Chaturthi, Dussehra, Diwali (Muhurat trading day), Gurunanak Jayanti, Christmas

@@ -129,26 +129,6 @@ def compute_atm(spot: float) -> int:
     return int(round(spot / 50) * 50)
 
 
-def next_expiry_tuesday(from_date: date) -> date:
-    """Given a Thursday entry date, return the following Tuesday (+5 days)."""
-    days = (1 - from_date.weekday()) % 7 or 7
-    return from_date + timedelta(days=days)
-
-
-def current_or_next_expiry_tuesday(from_date: date) -> date:
-    """Like next_expiry_tuesday, but returns from_date itself when from_date already IS
-    a Tuesday — i.e. the currently-open position's own expiry day — instead of skipping
-    ahead to next week. next_expiry_tuesday's `or 7` fallback is correct for its own
-    Thursday-entry callers but silently resolves to the WRONG (next week's) contract
-    when called with today's date on an actual Tuesday expiry day. Use this for any
-    caller that resolves "the expiry currently relevant to right now" rather than
-    "the expiry of a fresh Thursday entry" (see scheduler.py's strike-band monitor and
-    dry-run preview, which both call this with `today` and can run on a Tuesday)."""
-    if from_date.weekday() == 1:
-        return from_date
-    return next_expiry_tuesday(from_date)
-
-
 _MAX_EXPIRY_LOOKAHEAD_DAYS = 10   # a weekly series is never further out than this
 
 
@@ -156,31 +136,31 @@ def listed_expiry(from_date: date, include_today: bool) -> date:
     """Nearest NIFTY option expiry actually listed in Dhan's instruments master, on or
     after (include_today=True) or strictly after (include_today=False) from_date.
 
-    Replaces the "always Tuesday" arithmetic of next_expiry_tuesday() for every live
-    path -- that arithmetic picked 2026-10-20 for the 2026-10-15 entry when the exchange
-    had shifted that week's expiry off Tuesday, so no contracts resolved, the entry
-    aborted, and the ID-less position file blocked the next 3 weekly cycles (see
-    bug_niftyoptions_holiday_expiry_stale_position_blocks_entries). Falls back to the
-    Tuesday rule (with a warning) only if the master can't be read or has no expiry in
-    the next _MAX_EXPIRY_LOOKAHEAD_DAYS."""
+    The expiry is an attribute of the listed contract, never calculated: NSE moves a
+    holiday expiry to an earlier day (Tue->Mon in 2026; Thu->Wed, or Wed+Thu->Tue, in the
+    old Fri->Thu series), and "next Tuesday" arithmetic picked the unlisted 2026-10-20 for
+    the 2026-10-15 entry, which blocked 3 weekly cycles (see
+    bug_niftyoptions_holiday_expiry_stale_position_blocks_entries).
+
+    Raises RuntimeError if the master can't be read or lists no expiry within
+    _MAX_EXPIRY_LOOKAHEAD_DAYS. There is deliberately no computed fallback: the security
+    IDs come from the same master, so a guessed date could never produce a tradable
+    position, only a misleading one."""
     from src.dhan_instruments import list_option_expiries
 
-    fallback = current_or_next_expiry_tuesday(from_date) if include_today else next_expiry_tuesday(from_date)
     try:
         expiries = list_option_expiries("NIFTY")
     except Exception as exc:
-        logger.warning("Could not list NIFTY expiries ({}); falling back to Tuesday rule -> {}", exc, fallback)
-        return fallback
+        raise RuntimeError(f"Cannot list NIFTY expiries from the instruments master: {exc}") from exc
     for e in expiries:
         if e > from_date or (include_today and e == from_date):
             if (e - from_date).days <= _MAX_EXPIRY_LOOKAHEAD_DAYS:
                 return e
             break
-    logger.warning(
-        "No NIFTY expiry within {} days of {} in instruments master; falling back to Tuesday rule -> {}",
-        _MAX_EXPIRY_LOOKAHEAD_DAYS, from_date, fallback,
+    raise RuntimeError(
+        f"No NIFTY expiry listed within {_MAX_EXPIRY_LOOKAHEAD_DAYS} days of {from_date} "
+        "in the instruments master"
     )
-    return fallback
 
 
 def build_order_slip(atm: int, offset: int = 50) -> list[dict]:

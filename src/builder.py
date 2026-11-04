@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pandas as pd
+import pyarrow.parquet as pq
 from loguru import logger
 
 from src.config import (
@@ -234,6 +235,8 @@ def identify_weekly_cycles(
         })
         d += timedelta(days=1)
 
+    cycles = _resolve_actual_expiries(cycles, all_data)
+
     old_n = sum(1 for c in cycles if c["regime"] == "thu_expiry")
     new_n = sum(1 for c in cycles if c["regime"] == "tue_expiry")
     logger.info(
@@ -241,6 +244,40 @@ def identify_weekly_cycles(
         len(cycles), old_n, new_n,
     )
     return cycles
+
+
+def _resolve_actual_expiries(cycles: list[dict], all_data: pd.DataFrame) -> list[dict]:
+    """Set each cycle's REAL expiry from the data instead of a weekday offset.
+
+    `expiry_date` stays the nominal regime expiry (Thu before Sep 2025, Tue after) -- it
+    keys the parquet filename and every downstream join. `actual_expiry_date` is the last
+    day the market actually traded in (entry_date, expiry_date]: NSE only ever moves a
+    holiday expiry EARLIER (Thu->Wed, Wed+Thu->Tue, Tue->Mon), and a day with no bars for
+    ANY strike in the rolling-option data had no session. `window_dates` is every traded
+    day from entry through that real expiry.
+
+    Skipped (logged), never guessed: a cycle with no session after entry (entry day IS
+    the real expiry, e.g. a Wed+Thu holiday in the 2-day regime), or whose nominal expiry
+    is past the end of the data (an incomplete fetch would otherwise look like a holiday)."""
+    trading_days = sorted(set(all_data["date"]))
+    last_day = trading_days[-1] if trading_days else None
+    resolved = []
+    for c in cycles:
+        entry, nominal = c["entry_date"], c["expiry_date"]
+        if last_day is None or nominal > last_day:
+            logger.debug("{} {}: nominal expiry past end of data ({}) -- skip", c["regime"], nominal, last_day)
+            continue
+        held = [d for d in trading_days if entry < d <= nominal]
+        if not held:
+            logger.warning("{} {}: no session after entry {} up to nominal expiry -- skip (expiry on entry day)",
+                           c["regime"], nominal, entry)
+            continue
+        c["actual_expiry_date"] = held[-1]
+        c["window_dates"] = [entry, *held]
+        if held[-1] != nominal:
+            logger.info("{} {}: holiday-shifted expiry -> {} ({:%a})", c["regime"], nominal, held[-1], held[-1])
+        resolved.append(c)
+    return resolved
 
 
 # ── Build weekly parquet ──────────────────────────────────────────────────────
@@ -262,23 +299,10 @@ def build_cycle_parquet(cycle: dict, all_data: pd.DataFrame) -> bool:
     regime      = cycle["regime"]
     targets     = _target_strikes(atm)
 
-    # Date window depends on regime:
-    #   thu_expiry: Tue, Wed, Thu   (2 trading sessions)
-    #   tue_expiry: Thu, Fri, Mon, Tue  (4 trading sessions)
-    if regime == "thu_expiry":
-        wed = entry_date + timedelta(days=1)
-        window_dates = {entry_date, wed, expiry_date}
-    elif regime == "thu_expiry_4day":
-        # Mon → Tue → Wed → Thu
-        tue = entry_date + timedelta(days=1)
-        wed = entry_date + timedelta(days=2)
-        window_dates = {entry_date, tue, wed, expiry_date}
-    else:  # tue_expiry
-        fri = entry_date + timedelta(days=1)
-        mon = expiry_date - timedelta(days=1)
-        window_dates = {entry_date, fri, mon, expiry_date}
+    # Every traded day from entry through the REAL expiry (see _resolve_actual_expiries)
+    window_dates = set(cycle["window_dates"])
 
-    # Filter all_data to this 3-day window and target absolute strikes
+    # Filter all_data to this window and target absolute strikes
     mask = (
         all_data["date"].isin(window_dates) &
         all_data["strike"].isin(targets)
@@ -291,6 +315,7 @@ def build_cycle_parquet(cycle: dict, all_data: pd.DataFrame) -> bool:
 
     # Add strategy metadata columns
     week_df["expiry_date"]  = expiry_date
+    week_df["actual_expiry_date"] = cycle["actual_expiry_date"]
     week_df["entry_date"]   = entry_date
     week_df["entry_spot"]   = cycle["entry_spot"]
     week_df["atm_strike"]   = atm
@@ -304,7 +329,7 @@ def build_cycle_parquet(cycle: dict, all_data: pd.DataFrame) -> bool:
 
     # Keep useful columns only
     keep = [
-        "expiry_date", "entry_date", "entry_spot", "atm_strike", "regime",
+        "expiry_date", "actual_expiry_date", "entry_date", "entry_spot", "atm_strike", "regime",
         "strike", "strike_offset", "option_type",
         "timestamp", "date",
         "open", "high", "low", "close", "volume", "oi", "iv", "spot",
@@ -333,7 +358,8 @@ def build_all(start: str, end: str) -> int:
 
     for cycle in cycles:
         out = settings.weekly_dir / f"{cycle['expiry_date']}_{cycle['regime']}.parquet"
-        if out.exists():
+        # Rebuild files written before actual_expiry_date existed (2026-11-05 schema change)
+        if out.exists() and "actual_expiry_date" in pq.read_schema(out).names:
             skipped += 1
             continue
         if build_cycle_parquet(cycle, all_data):

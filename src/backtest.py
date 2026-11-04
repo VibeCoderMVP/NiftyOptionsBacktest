@@ -2,8 +2,12 @@
 Backtest engine: weekly Nifty options ladder.
 
 Strategy logic:
-  - Entry  : last 5-min bar of Tuesday  (the entry_date)
-  - Exit   : last 5-min bar of Thursday (the expiry_date)
+  - Entry  : last 5-min bar of the entry_date
+  - Exit   : last 5-min bar of the REAL expiry (actual_expiry_date, resolved by the
+             builder from the days that actually traded -- holiday shifts included).
+             No fallback: a cycle with no bars on its real expiry is unscorable.
+  - A ladder is scored only when ALL its legs (1L=2, 3L=6, 5L=10) have bars at both
+    entry and exit -- a missing (usually deep-ITM) leg is never silently dropped.
   - Side   : BUY  -> pay premium at entry, receive at exit
              SELL -> collect premium at entry, pay back at exit
 
@@ -41,6 +45,7 @@ CONFIGS = {
     "3L": "in_3L",
     "5L": "in_5L",
 }
+CONFIG_LEGS = {"1L": 2, "3L": 6, "5L": 10}
 SIDES = ["BUY", "SELL"]
 
 # Rough brokerage estimate per leg per lot (Rs — adjust as per your plan)
@@ -62,7 +67,15 @@ def _last_bar(df: pd.DataFrame, target_date) -> pd.DataFrame:
     )
 
 
-def compute_cycle_pnl(path: Path) -> dict | None:
+def cycle_exit_date(df: pd.DataFrame) -> str | None:
+    """The cycle's real expiry (builder-resolved). None for a parquet built before
+    2026-11-05 -- rebuild it (`pipeline.py build` rewrites files missing the column)."""
+    if "actual_expiry_date" not in df.columns:
+        return None
+    return str(df["actual_expiry_date"].iloc[0])
+
+
+def compute_cycle_pnl(path: Path, unscorable: list | None = None) -> dict | None:
     """
     Compute P&L for all 6 configurations for one weekly cycle.
     Returns a dict with one key per config-side, or None if data is insufficient.
@@ -83,18 +96,22 @@ def compute_cycle_pnl(path: Path) -> dict | None:
     _expiry_date = _date.fromisoformat(expiry)
     lot_size = lot_size_for_date(_expiry_date)
 
-    entry_bars = _last_bar(df, entry)
-    exit_bars  = _last_bar(df, expiry)
+    actual = cycle_exit_date(df)
+    if actual is None:
+        logger.warning("{}: no actual_expiry_date column -- rebuild weekly parquets", path.name)
+        if unscorable is not None:
+            unscorable.append((expiry, regime, "parquet predates actual_expiry_date; rebuild"))
+        return None
 
-    # Holiday fallback: if Thursday expiry is a market holiday, NSE moves expiry to Wednesday
-    if exit_bars.empty:
-        wed = str(pd.Timestamp(entry).date() + pd.Timedelta(days=1))
-        exit_bars = _last_bar(df, wed)
-        if not exit_bars.empty:
-            logger.info("Holiday expiry: using Wednesday {} exit for {}", wed, expiry)
+    entry_bars = _last_bar(df, entry)
+    exit_bars  = _last_bar(df, actual)
 
     if entry_bars.empty or exit_bars.empty:
-        logger.warning("Missing entry or exit bars for {}", expiry)
+        reason = (f"no bars for target strikes on {'entry ' + entry if entry_bars.empty else 'real expiry ' + actual}"
+                  " (strikes outside the rolling ATM+-4 range)")
+        logger.warning("{} {}: unscorable -- {}", regime, expiry, reason)
+        if unscorable is not None:
+            unscorable.append((expiry, regime, reason))
         return None
 
     # Merge entry and exit prices on (strike, option_type)
@@ -111,6 +128,7 @@ def compute_cycle_pnl(path: Path) -> dict | None:
 
     result: dict = {
         "expiry_date": expiry,
+        "actual_expiry_date": actual,
         "entry_date":  entry,
         "entry_spot":  spot,
         "atm_strike":  atm,
@@ -123,7 +141,8 @@ def compute_cycle_pnl(path: Path) -> dict | None:
         if col not in merged.columns:
             continue
         legs = merged[merged[col] == True].copy()
-        if legs.empty:
+        if len(legs) != CONFIG_LEGS[config]:
+            result[f"{config}_incomplete_legs"] = len(legs)   # not scored: never drop a leg silently
             continue
 
         n_legs        = len(legs)
@@ -165,10 +184,16 @@ def run_backtest() -> pd.DataFrame:
         return pd.DataFrame()
 
     rows = []
+    unscorable: list[tuple[str, str, str]] = []
     for f in files:
-        r = compute_cycle_pnl(f)
+        r = compute_cycle_pnl(f, unscorable)
         if r:
             rows.append(r)
+
+    if unscorable:
+        logger.warning("{} of {} cycles UNSCORABLE (excluded, not guessed):", len(unscorable), len(files))
+        for expiry, regime, reason in unscorable:
+            logger.warning("  {} {}: {}", regime, expiry, reason)
 
     if not rows:
         logger.error("No cycles produced results.")
@@ -214,9 +239,9 @@ def _regime_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 REGIME_META = {
-    "thu_expiry":      ("pre_sep2025_2day",     "Pre-Sep 2025  |  Entry=Tue close  EXIT=Thu close  |  2-day hold"),
-    "thu_expiry_4day": ("pre_sep2025_4day",     "Pre-Sep 2025  |  Entry=Mon close  EXIT=Thu close  |  4-day hold  [apple-to-apple vs new regime]"),
-    "tue_expiry":      ("sep2025_onwards_4day",  "Sep 2025+     |  Entry=Thu close  EXIT=Tue close  |  4-day hold"),
+    "thu_expiry":      ("pre_sep2025_2day",     "Pre-Sep 2025  |  Entry=Tue close  EXIT=Thu close (or real holiday-shifted expiry)  |  2-day hold"),
+    "thu_expiry_4day": ("pre_sep2025_4day",     "Pre-Sep 2025  |  Entry=Mon close  EXIT=Thu close (or real holiday-shifted expiry)  |  4-day hold  [apple-to-apple vs new regime]"),
+    "tue_expiry":      ("sep2025_onwards_4day",  "Sep 2025+     |  Entry=Thu close  EXIT=Tue close (or real holiday-shifted expiry)  |  4-day hold"),
 }
 
 

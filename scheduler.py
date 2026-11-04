@@ -396,8 +396,8 @@ def _refresh_strike_band(band: StrikeBandState, nifty_spot: NiftySpotCollector) 
 
     atm = compute_atm(open_px)
     strikes = [atm + off for off in _STRIKE_BAND_OFFSETS]
-    expiry = listed_expiry(today, include_today=True)
     try:
+        expiry = listed_expiry(today, include_today=True)
         resolved = resolve_option_ids(strikes, expiry)
     except Exception as exc:
         logger.warning("STRIKE BAND: could not resolve option security IDs: {}", exc)
@@ -487,8 +487,8 @@ def _refresh_daily_preview(preview: PreviewState, nifty_spot: NiftySpotCollector
         return
 
     atm = compute_atm(open_px)
-    expiry = listed_expiry(today, include_today=True)
     try:
+        expiry = listed_expiry(today, include_today=True)
         resolved = resolve_option_ids([atm - 50, atm, atm + 50], expiry)
     except Exception as exc:
         logger.warning("DRY-RUN PREVIEW: could not resolve option security IDs: {}", exc)

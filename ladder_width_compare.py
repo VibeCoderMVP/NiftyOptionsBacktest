@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
-from src.backtest import BROKERAGE_PER_LEG, REGIME_META, _last_bar
+from src.backtest import BROKERAGE_PER_LEG, _last_bar, cycle_exit_date
 from src.config import lot_size_for_date, settings
 
 OFFSET_SETS = {
@@ -52,13 +52,13 @@ def compute_cycle(path: Path) -> dict | None:
 
     lot_size = lot_size_for_date(_date.fromisoformat(expiry))
 
+    # Exit on the builder-resolved REAL expiry, no fallback (mirrors compute_cycle_pnl)
+    actual = cycle_exit_date(df)
+    if actual is None:
+        logger.warning("{}: no actual_expiry_date -- rebuild weekly parquets", path.name)
+        return None
     entry_bars = _last_bar(df, entry)
-    exit_bars  = _last_bar(df, expiry)
-
-    # Holiday fallback, mirrors compute_cycle_pnl in src/backtest.py
-    if exit_bars.empty:
-        wed = str(pd.Timestamp(entry).date() + pd.Timedelta(days=1))
-        exit_bars = _last_bar(df, wed)
+    exit_bars  = _last_bar(df, actual)
 
     if entry_bars.empty or exit_bars.empty:
         return None

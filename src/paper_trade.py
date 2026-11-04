@@ -65,16 +65,9 @@ def _save_journal(records: list[dict], journal_path: Path | None = None) -> None
     )
 
 
-def _next_tuesday(from_date: date) -> date:
-    """Given a Thursday entry date, return the following Tuesday."""
-    days = (1 - from_date.weekday()) % 7 or 7
-    return from_date + timedelta(days=days)
-
-
 def _active_position_expiry(active_path: Path | None = None) -> date | None:
-    """Expiry the signal actually resolved (from the real instruments calendar) and wrote
-    into the active position file -- preferred over _next_tuesday(), which is wrong on
-    holiday-shifted weeks."""
+    """Expiry the signal resolved from the listed contracts and wrote into the active
+    position file -- the only source for a journal record's expiry (never calculated)."""
     path = active_path or ACTIVE_OPTIONS_PATH
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -97,6 +90,7 @@ def log_entry(
     journal_path: Path | None = None,
     ladder_id: str = "3L-50",
     entry_shift: str | None = None,
+    expiry_date: date | None = None,
 ) -> dict:
     """
     Log a new paper trade entry.
@@ -112,7 +106,12 @@ def log_entry(
         raise ValueError(f"Expected 6 LTP values, got {len(legs_ltps)}")
 
     entry_date  = entry_date or _ist_now().date()
-    expiry_date = _active_position_expiry(active_path) or _next_tuesday(entry_date)
+    expiry_date = expiry_date or _active_position_expiry(active_path)
+    if expiry_date is None:
+        raise RuntimeError(
+            f"No open position with an expiry_date in {active_path or ACTIVE_OPTIONS_PATH} -- "
+            "run the signal (SIGNAL.bat / pipeline.py signal) before logging an entry"
+        )
     entry_time  = _ist_now().strftime("%Y-%m-%d %H:%M")
     lot_size    = lot_size_for_date(expiry_date)
 
