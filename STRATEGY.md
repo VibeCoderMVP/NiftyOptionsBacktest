@@ -219,14 +219,23 @@ For **5L_SELL (10 legs):** Expect ~Rs 1.5–2.0L margin.
 
 ## 10. Holiday Handling
 
-When the **entry day** (Thursday in new regime) is a market holiday:
-- Advance entry to the previous trading day (Wednesday)
-- Same process — last 5-min bar, round to nearest 50
+**Live forward test (scheduler.py, as of 2026-11-04).** These rules replace the original
+"advance entry to Wednesday" plan for the live paper ladders (3L-50, 3L-100):
 
-When the **expiry day** (Tuesday in new regime) is a market holiday:
-- NSE moves expiry to the preceding Wednesday
-- Your exit is now Wednesday close, not Tuesday
-- The backtest handles this automatically (holiday fallback built in)
+| Situation | What the scheduler does | Journal tag (`entry_shift`) |
+|---|---|---|
+| Thursday is an NSE holiday | No entry Thursday. Enter **Friday at 15:10**, ATM from live spot | `holiday_shift_next_day` |
+| Thursday was a normal trading day but no entry happened (machine off, no internet, every attempt failed) | Enter **Friday 09:16-09:30**, ATM from **Friday's open**, legs at live prices at entry. Retries every 60s inside the window. Past 09:30 the **week is skipped** (one Telegram) | `missed_thu_catchup_fri_open` |
+| Tuesday (expiry) is an NSE holiday | Expiry is whatever NSE actually lists; in 2026 the exchange moved it to the **Monday before** (10-19, 11-09, 11-23). The scheduler takes it from Dhan's instruments master, never by assuming Tuesday | -- |
+
+Both shifted entries hold fewer sessions than the 4-day `tue_expiry` cycle, so analyse
+tagged records separately. Holidays come from `trading_core/market_calendar.py`. **Each
+year's NSE F&O holiday list must be added there**, usually published mid-December. Without
+it there is no shift and no catch-up, and a Telegram alert asks for the list. See CLAUDE.md
+for the mechanics.
+
+**Backtest convention (unchanged):** when the expiry day is a holiday, `compute_cycle_pnl()`
+falls back to the preceding Wednesday's data if the Tuesday/Thursday data is absent.
 
 **Public holidays to watch for Nifty options (check NSE calendar each year):**
 Republic Day, Holi, Ram Navami, Mahavir Jayanti, Good Friday, Eid, Independence Day, Ganesh Chaturthi, Dussehra, Diwali (Muhurat trading day), Gurunanak Jayanti, Christmas
@@ -236,6 +245,12 @@ Republic Day, Holi, Ram Navami, Mahavir Jayanti, Good Friday, Eid, Independence 
 ## 11. Forward Testing Protocol
 
 The automated pipeline (Phase 2) handles this each week. For the first few weeks, verify the automation is working correctly:
+
+> **Current timings (2026-11-04):** the always-on `scheduler.py` (not ET) now drives entry
+> and exit. Both run at **15:10** (moved from 15:20/15:25 for NSE's CAS and broker RMS
+> square-off). Holiday and missed-Thursday entries follow §10. The 15:20/15:25 times and
+> ET-driven wording below are the original Phase 2 description. CLAUDE.md's "Auto-Pilot"
+> section is authoritative.
 
 ### Each Thursday at 15:20 IST
 

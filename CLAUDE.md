@@ -179,7 +179,10 @@ in this codebase (TW's P1/P2/P3, each strategy's monitor.py):
   same venv) → subscribes to ZMQ port 5555/5557 itself and waits (up to 6 min) for all 6
   leg LTPs → `paper_trade.log_entry()` → sends a **new** Telegram message with the confirmed
   total premium collected (previously missing — the order-slip alert from `run_signal()`
-  only has the *proposed* legs, not the actual fill premiums).
+  only has the *proposed* legs, not the actual fill premiums). Expiry is the nearest
+  listed one (`listed_expiry()`). Two more entry paths exist: a Thursday-holiday shift to
+  Friday 15:10, and a missed-normal-Thursday catch-up on Friday 09:16-09:30 at Friday's
+  open. See "Thursday-holiday entry shift" / "Missed-Thursday catch-up" under Known Quirks.
 - **Auto-exit:** position open, `expiry_date == today`, at/after `exit_time_ist` (default
   15:10, moved from 15:25 2026-08-03 — see the CAS/broker-RMS note near the top of this
   file) → same LTP wait (shorter timeout — legs have been ticking all week) →
@@ -489,7 +492,7 @@ ladder has no journal entry since then (machine off, no internet, every attempt 
 - **Unverified live:** the REST OHLC open at 09:16 has only been seen working off-hours. The
   entry log line records which source was used and the value, so check it on the first real use.
 
-**Holiday handling (backtest):** When expiry day is a market holiday, NSE moves expiry to previous Wednesday. `compute_cycle_pnl()` in backtest.py falls back to Wednesday if Thursday/Tuesday data is absent.
+**Holiday handling (backtest):** When expiry day is a market holiday, the backtest assumes expiry moved to the previous Wednesday (in 2026 NSE actually used the previous Monday for Tuesday holidays; the live path reads the real listing). `compute_cycle_pnl()` in backtest.py falls back to Wednesday if Thursday/Tuesday data is absent.
 
 **Rolling data coverage gap:** When Nifty moves >200 pts during the week, entry strikes fall outside the ATM±4 relative range on exit day → exit LTP is absent. `analyse_trades.py` infers intrinsic value (`max(exit_spot - strike, 0.05)` for CE) from the exit-day spot price. These are marked with `*`.
 
