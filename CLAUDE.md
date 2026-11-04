@@ -457,6 +457,21 @@ the 2026-10-15 entry picked 2026-10-20 (not listed), aborted with 0/6 LTPs, and 
 `paper_trade.log_entry()` takes the journal's `expiry_date` from the active position file for
 the same reason.
 
+**Thursday-holiday entry shift (added 2026-11-04):** `scheduler.py::_entry_shift_today()`
+checks `trading_core.market_calendar`.
+- **Entry weekday is an NSE holiday:** no entry that day. Before this, the scheduler fired
+  anyway off the last close and aborted on 0/6 LTPs.
+- **The following day:** enters at the same `entry_time_ist`. The journal record gets
+  `"entry_shift": "holiday_shift_next_day"`, and the Telegram message and signal event carry
+  the same tag. A shifted cycle holds only 1-2 sessions, so analyse it separately from the
+  regular 4-day cycles.
+- **Holidays only:** a Thursday missed because of an outage is NOT made up on Friday.
+- **Year without a holiday list:** no shift; a Telegram alert asks for the list to be added.
+
+Verified with a simulated holiday week through the real `_try_auto_entry` (stubbed clock,
+signal, ticks and Telegram; temp files). No real Thursday holiday is left in 2026, so the
+first live case is in 2027 -- after that year's list is added.
+
 **Holiday handling (backtest):** When expiry day is a market holiday, NSE moves expiry to previous Wednesday. `compute_cycle_pnl()` in backtest.py falls back to Wednesday if Thursday/Tuesday data is absent.
 
 **Rolling data coverage gap:** When Nifty moves >200 pts during the week, entry strikes fall outside the ATM±4 relative range on exit day → exit LTP is absent. `analyse_trades.py` infers intrinsic value (`max(exit_spot - strike, 0.05)` for CE) from the exit-day spot price. These are marked with `*`.

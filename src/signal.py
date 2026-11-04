@@ -209,7 +209,7 @@ def format_signal_message(
     )
     lines = [
         f"NIFTY WEEKLY OPTIONS - ENTRY SIGNAL {banner}",
-        f"Date      : {entry_date} (Thursday)",
+        f"Date      : {entry_date} ({entry_date:%A})",
         "Regime    : tue_expiry | 4-day hold",
         f"Nifty Spot: {spot:.0f}",
         f"ATM Strike: {atm}",
@@ -411,7 +411,7 @@ def run_signal(
     active_path = active_path or ACTIVE_OPTIONS_PATH
 
     table = Table(
-        title=f"NIFTY ENTRY SIGNAL [{variant_label}] | Entry: {today} (Thu) | Expiry: {expiry_date} ({expiry_date:%a})",
+        title=f"NIFTY ENTRY SIGNAL [{variant_label}] | Entry: {today} ({today:%a}) | Expiry: {expiry_date} ({expiry_date:%a})",
         show_lines=True,
     )
     table.add_column("Strike", style="cyan",   justify="right")

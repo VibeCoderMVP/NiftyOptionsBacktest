@@ -96,9 +96,14 @@ def log_entry(
     active_path: Path | None = None,
     journal_path: Path | None = None,
     ladder_id: str = "3L-50",
+    entry_shift: str | None = None,
 ) -> dict:
     """
     Log a new paper trade entry.
+
+    entry_shift: set (e.g. "holiday_shift_next_day") when the entry ran on a day other
+    than the normal entry weekday -- lets holiday-shifted, shorter-hold cycles be
+    analysed separately from the regular 4-day ones.
 
     legs_ltps: 6 floats in order —
       [ATM-offset CE, ATM-offset PE, ATM CE, ATM PE, ATM+offset CE, ATM+offset PE]
@@ -148,6 +153,8 @@ def log_entry(
         "outcome":             None,
         "paper_trade":         True,
     }
+    if entry_shift:
+        record["entry_shift"] = entry_shift
 
     records = _load_journal(journal_path)
     records.append(record)

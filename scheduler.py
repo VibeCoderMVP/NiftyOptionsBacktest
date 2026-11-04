@@ -83,6 +83,7 @@ from src.signal import (
     listed_expiry, run_signal, send_telegram,
 )
 from trading_core.journal import append_event, build_event_record
+from trading_core.market_calendar import is_fo_trading_day
 from trading_core.market_structure import FO_TRADING_DECISION_CUTOFF
 from trading_core.paths import fleet_path
 from trading_core.session_shutdown import NSE_SESSION_END, should_end_session
@@ -613,6 +614,40 @@ def _subscribe_variant_legs(variant: dict, pos: dict) -> None:
         logger.warning("{}: could not request dedicated leg subscription: {}", variant["id"], exc)
 
 
+_HOLIDAY_SHIFT_TAG = "holiday_shift_next_day"
+_calendar_gap_warned: set[date] = set()
+
+
+def _entry_shift_today(today: date, entry_weekday: int) -> str | None | bool:
+    """Is today an entry day? None = normal entry day, _HOLIDAY_SHIFT_TAG = the day after
+    an entry day that was an NSE holiday (Fri for a Thursday holiday), False = no entry.
+
+    Holidays only: a Thursday missed for any other reason (machine off, crash) is NOT made
+    up on Friday -- a catch-up there would hide an outage. An entry-weekday holiday no
+    longer fires at all (it used to run at 15:10 off the last close and abort on 0/6 LTPs).
+    A year with no holiday list in trading_core.market_calendar never shifts (warned once)."""
+    if today.weekday() == entry_weekday:
+        return False if is_fo_trading_day(today) is False else None
+    prev = today - timedelta(days=1)
+    if prev.weekday() != entry_weekday or is_fo_trading_day(today) is False:
+        return False
+    prev_trading = is_fo_trading_day(prev)
+    if prev_trading is None:
+        if prev not in _calendar_gap_warned:
+            _calendar_gap_warned.add(prev)
+            logger.warning(
+                "No NSE holiday list for {} in trading_core.market_calendar -- cannot tell if "
+                "{} was a holiday; no holiday-shift entry today", prev.year, prev,
+            )
+            send_telegram(
+                f"NIFTY WEEKLY OPTIONS - HOLIDAY CALENDAR MISSING FOR {prev.year}\n"
+                f"Add NSE's {prev.year} F&O holiday list to trading_core/market_calendar.py. "
+                "Until then a Thursday-holiday entry will not shift to Friday."
+            )
+        return False
+    return _HOLIDAY_SHIFT_TAG if prev_trading is False else False
+
+
 def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
     vid = variant["id"]
     if not _variant_entry_enabled(cfg, variant):
@@ -624,7 +659,8 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         eh, em = (int(x) for x in FO_TRADING_DECISION_CUTOFF.split(":"))
     entry_weekday = int(cfg.get("entry_weekday", 3))
 
-    if now.weekday() != entry_weekday:
+    entry_shift = _entry_shift_today(now.date(), entry_weekday)
+    if entry_shift is False:
         return
     if not (now.hour > eh or (now.hour == eh and now.minute >= em)):
         return
@@ -640,7 +676,8 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
 
     # mark attempted regardless of outcome — never retry-storm same day
     fired[f"entry_{vid}"] = now.date()
-    logger.info("[{}] AUTO-ENTRY triggered at {} IST", vid, now.strftime("%H:%M:%S"))
+    logger.info("[{}] AUTO-ENTRY triggered at {} IST{}", vid, now.strftime("%H:%M:%S"),
+                f" ({entry_shift}: {now.date() - timedelta(days=1)} was an NSE holiday)" if entry_shift else "")
 
     try:
         run_signal(
@@ -699,7 +736,7 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         record = paper_trade.log_entry(
             atm=atm, legs_ltps=ltps, entry_spot=spot,
             offset=variant["offset"], active_path=active_path,
-            journal_path=journal_path, ladder_id=vid,
+            journal_path=journal_path, ladder_id=vid, entry_shift=entry_shift,
         )
     except Exception as exc:
         logger.error("[{}] AUTO-ENTRY: log_entry() failed: {}", vid, exc)
@@ -716,7 +753,8 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         "Legs tracked (paper SELL 1 lot each -- no real orders):"
     msg = "\n".join([
         f"NIFTY WEEKLY OPTIONS [{vid}] - 3L STRADDLE OPENED{paper_tag}",
-        f"Entry : {now.strftime('%Y-%m-%d %H:%M')} IST",
+        f"Entry : {now.strftime('%Y-%m-%d %H:%M')} IST ({now:%a})"
+        + (" -- HOLIDAY-SHIFTED, previous day was an NSE holiday" if entry_shift else ""),
         f"Expiry: {record['expiry_date']}",
         f"Spot  : {spot:.2f}  |  ATM: {atm}",
         "",
@@ -730,7 +768,7 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
                 vid, atm, total_premium, rs_collected)
     _log_event("entry", vid, atm=atm, entry_spot=spot, expiry_date=record["expiry_date"],
                total_premium_pts=total_premium, rs_collected=rs_collected,
-               entry_time_str=now.strftime("%Y-%m-%d %H:%M"))
+               entry_time_str=now.strftime("%Y-%m-%d %H:%M"), entry_shift=entry_shift)
 
 
 def _try_auto_exit(cfg: dict, variant: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
