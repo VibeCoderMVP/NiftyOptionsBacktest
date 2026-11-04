@@ -71,6 +71,20 @@ def _next_tuesday(from_date: date) -> date:
     return from_date + timedelta(days=days)
 
 
+def _active_position_expiry(active_path: Path | None = None) -> date | None:
+    """Expiry the signal actually resolved (from the real instruments calendar) and wrote
+    into the active position file -- preferred over _next_tuesday(), which is wrong on
+    holiday-shifted weeks."""
+    path = active_path or ACTIVE_OPTIONS_PATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("status") == "open" and data.get("expiry_date"):
+            return date.fromisoformat(str(data["expiry_date"]))
+    except Exception:
+        pass
+    return None
+
+
 def log_entry(
     atm: int,
     legs_ltps: list[float],
@@ -93,7 +107,7 @@ def log_entry(
         raise ValueError(f"Expected 6 LTP values, got {len(legs_ltps)}")
 
     entry_date  = entry_date or _ist_now().date()
-    expiry_date = _next_tuesday(entry_date)
+    expiry_date = _active_position_expiry(active_path) or _next_tuesday(entry_date)
     entry_time  = _ist_now().strftime("%Y-%m-%d %H:%M")
     lot_size    = lot_size_for_date(expiry_date)
 

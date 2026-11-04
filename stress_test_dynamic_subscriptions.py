@@ -48,7 +48,7 @@ import zmq
 from loguru import logger
 
 from src.dhan_instruments import resolve_option_ids
-from src.signal import next_expiry_tuesday
+from src.signal import listed_expiry
 from trading_core.subscription_registry import request_subscription
 
 _PRIMARY_PORT = 5555
@@ -179,7 +179,7 @@ def main() -> None:
 
     requested: list[dict] = []       # accumulated across iterations — additive, like real usage
     seen_strikes: set[int] = set()
-    expiry = next_expiry_tuesday(date.today())
+    expiry = listed_expiry(date.today(), include_today=False)
 
     i = 0
     try:

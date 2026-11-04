@@ -149,6 +149,40 @@ def current_or_next_expiry_tuesday(from_date: date) -> date:
     return next_expiry_tuesday(from_date)
 
 
+_MAX_EXPIRY_LOOKAHEAD_DAYS = 10   # a weekly series is never further out than this
+
+
+def listed_expiry(from_date: date, include_today: bool) -> date:
+    """Nearest NIFTY option expiry actually listed in Dhan's instruments master, on or
+    after (include_today=True) or strictly after (include_today=False) from_date.
+
+    Replaces the "always Tuesday" arithmetic of next_expiry_tuesday() for every live
+    path -- that arithmetic picked 2026-10-20 for the 2026-10-15 entry when the exchange
+    had shifted that week's expiry off Tuesday, so no contracts resolved, the entry
+    aborted, and the ID-less position file blocked the next 3 weekly cycles (see
+    bug_niftyoptions_holiday_expiry_stale_position_blocks_entries). Falls back to the
+    Tuesday rule (with a warning) only if the master can't be read or has no expiry in
+    the next _MAX_EXPIRY_LOOKAHEAD_DAYS."""
+    from src.dhan_instruments import list_option_expiries
+
+    fallback = current_or_next_expiry_tuesday(from_date) if include_today else next_expiry_tuesday(from_date)
+    try:
+        expiries = list_option_expiries("NIFTY")
+    except Exception as exc:
+        logger.warning("Could not list NIFTY expiries ({}); falling back to Tuesday rule -> {}", exc, fallback)
+        return fallback
+    for e in expiries:
+        if e > from_date or (include_today and e == from_date):
+            if (e - from_date).days <= _MAX_EXPIRY_LOOKAHEAD_DAYS:
+                return e
+            break
+    logger.warning(
+        "No NIFTY expiry within {} days of {} in instruments master; falling back to Tuesday rule -> {}",
+        _MAX_EXPIRY_LOOKAHEAD_DAYS, from_date, fallback,
+    )
+    return fallback
+
+
 def build_order_slip(atm: int, offset: int = 50) -> list[dict]:
     return [
         {"strike": atm - offset, "type": "CE"},
@@ -179,7 +213,7 @@ def format_signal_message(
         "Regime    : tue_expiry | 4-day hold",
         f"Nifty Spot: {spot:.0f}",
         f"ATM Strike: {atm}",
-        f"Expiry    : {expiry_date} (Tuesday)",
+        f"Expiry    : {expiry_date} ({expiry_date:%A})",
         "",
         "ORDER SLIP (all SELL, 1 lot each):" if not paper_only
         else "PAPER ORDER SLIP (tracking only, all SELL, 1 lot each):",
@@ -192,8 +226,8 @@ def format_signal_message(
         "",
         ("ENTER at 15:20-15:28 IST today." if not paper_only
          else "PAPER ONLY -- no real orders to place for this variant."),
-        f"CLOSE ALL by 15:25 on {expiry_date} (Tuesday)." if not paper_only
-        else f"Paper-closes automatically by 15:25 on {expiry_date} (Tuesday).",
+        f"CLOSE ALL by 15:25 on {expiry_date} ({expiry_date:%A})." if not paper_only
+        else f"Paper-closes automatically by 15:25 on {expiry_date} ({expiry_date:%A}).",
         f"Lot size: {NIFTY_LOT_SIZE} shares/lot",
     ]
     return "\n".join(lines)
@@ -250,14 +284,13 @@ def write_active_position(
 
     active_path = active_path or ACTIVE_OPTIONS_PATH
     strikes = [atm - offset, atm, atm + offset]
-    try:
-        resolved = resolve_option_ids(strikes, expiry_date)
-    except Exception as exc:
-        logger.warning("Could not resolve option security IDs ({}); writing without IDs", exc)
-        resolved = [
-            {"strike": s, "option_type": t, "security_id": "", "exchange_segment": "NSE_FNO"}
-            for s in strikes for t in ("CE", "PE")
-        ]
+    # Never write an "open" position without all 6 security IDs -- nothing can tick it,
+    # and an ID-less open file silently blocked every auto-entry from 2026-10-15 to
+    # 2026-11-04. Raise instead; callers alert and nothing is left behind.
+    resolved = resolve_option_ids(strikes, expiry_date)
+    missing = [f"{c['strike']}{c['option_type']}" for c in resolved if not c.get("security_id")]
+    if missing:
+        raise RuntimeError(f"Security IDs not found for expiry {expiry_date}: {missing}")
 
     # Merge entry LTPs into resolved contracts (order matches build_order_slip)
     contracts = []
@@ -373,12 +406,12 @@ def run_signal(
                 return
 
     atm         = compute_atm(spot)
-    expiry_date = next_expiry_tuesday(today)
+    expiry_date = listed_expiry(today, include_today=False)
     legs        = build_order_slip(atm, offset)
     active_path = active_path or ACTIVE_OPTIONS_PATH
 
     table = Table(
-        title=f"NIFTY ENTRY SIGNAL [{variant_label}] | Entry: {today} (Thu) | Expiry: {expiry_date} (Tue)",
+        title=f"NIFTY ENTRY SIGNAL [{variant_label}] | Entry: {today} (Thu) | Expiry: {expiry_date} ({expiry_date:%a})",
         show_lines=True,
     )
     table.add_column("Strike", style="cyan",   justify="right")
@@ -402,6 +435,12 @@ def run_signal(
     console.print(f"[dim]Lot size: {NIFTY_LOT_SIZE} shares | Brokerage est: Rs 120 for 6 legs[/dim]")
     console.print()
 
+    # Resolve IDs + write the position file BEFORE alerting: if the contracts can't be
+    # resolved this raises and no order slip goes out for a non-existent expiry.
+    write_active_position(
+        today, expiry_date, spot, atm, legs,
+        offset=offset, active_path=active_path, variant_label=variant_label,
+    )
     msg = format_signal_message(
         spot, atm, legs, today, expiry_date,
         variant_label=variant_label, paper_only=paper_only,
@@ -409,10 +448,6 @@ def run_signal(
     send_telegram(msg)
     if save_signal:
         save_last_signal(today, expiry_date, spot, atm)
-    write_active_position(
-        today, expiry_date, spot, atm, legs,
-        offset=offset, active_path=active_path, variant_label=variant_label,
-    )
     logger.info(
         "Signal complete | variant={} ATM={} expiry={} spot={:.0f}",
         variant_label, atm, expiry_date, spot,

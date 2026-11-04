@@ -79,8 +79,8 @@ from src import paper_trade
 from src.config import LADDER_VARIANTS, lot_size_for_date, settings
 from src.dhan_instruments import resolve_option_ids
 from src.signal import (
-    ACTIVE_OPTIONS_PATH, build_order_slip, compute_atm, current_or_next_expiry_tuesday,
-    get_nifty_open, get_nifty_spot, run_signal, send_telegram,
+    ACTIVE_OPTIONS_PATH, compute_atm, get_nifty_open, get_nifty_spot,
+    listed_expiry, run_signal, send_telegram,
 )
 from trading_core.journal import append_event, build_event_record
 from trading_core.market_structure import FO_TRADING_DECISION_CUTOFF
@@ -153,6 +153,51 @@ def _read_active_position(path: Path = ACTIVE_OPTIONS_PATH) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _set_position_status(path: Path, status: str, reason: str) -> None:
+    """Move a position file out of "open" (every consumer -- tick_service, the REST LTP
+    service, ET, this scheduler -- treats anything but "open" as inactive)."""
+    pos = _read_active_position(path)
+    if not pos:
+        return
+    pos["status"] = status
+    pos["status_reason"] = reason
+    pos["updated_at"] = _ist_now().isoformat(timespec="seconds")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(pos, indent=2, default=str), encoding="utf-8")
+    tmp.replace(path)
+    logger.warning("Position file {} marked {} ({})", path.name, status, reason)
+
+
+def _retire_stale_position(variant: dict) -> None:
+    """An "open" position whose expiry_date is already past can never be exited by
+    _try_auto_exit (it only fires ON expiry day) and blocks every future auto-entry.
+    That is exactly how the aborted 2026-10-15 entry (expiry 2026-10-20, ID-less) froze
+    both ladders for 3 weeks with nothing but a heartbeat line to show for it. Retire it
+    loudly so the next entry day proceeds."""
+    path = variant["active_path"]
+    pos = _read_active_position(path)
+    if not pos or pos.get("status") != "open":
+        return
+    try:
+        expiry = date.fromisoformat(str(pos.get("expiry_date")))
+    except ValueError:
+        return
+    today = _ist_now().date()
+    if expiry >= today:
+        return
+    vid = variant["id"]
+    had_fill = any(c.get("entry_ltp") is not None for c in pos.get("contracts", []))
+    _set_position_status(path, "expired_stale", f"still open on {today}, expiry was {expiry}")
+    send_telegram(
+        f"NIFTY WEEKLY OPTIONS [{vid}] - STALE POSITION RETIRED\n"
+        f"Position file was still 'open' on {today} but expiry was {expiry} "
+        f"(entry {pos.get('entry_date')}, ATM {pos.get('atm')}). Marked expired_stale so "
+        "auto-entry is unblocked."
+        + ("\nIt HAD entry fills -- its journal record is still open; close it manually."
+           if had_fill else "\nNo entry fills were recorded -- nothing to close in the journal.")
+    )
 
 
 def _write_heartbeat(started_at: str) -> None:
@@ -341,7 +386,7 @@ def _refresh_strike_band(band: StrikeBandState, nifty_spot: NiftySpotCollector) 
 
     atm = compute_atm(open_px)
     strikes = [atm + off for off in _STRIKE_BAND_OFFSETS]
-    expiry = current_or_next_expiry_tuesday(today)
+    expiry = listed_expiry(today, include_today=True)
     try:
         resolved = resolve_option_ids(strikes, expiry)
     except Exception as exc:
@@ -432,8 +477,7 @@ def _refresh_daily_preview(preview: PreviewState, nifty_spot: NiftySpotCollector
         return
 
     atm = compute_atm(open_px)
-    legs_ct = build_order_slip(atm)   # [{"strike":.., "type":..}, ...] x 6, ATM-50/ATM/ATM+50 order
-    expiry = current_or_next_expiry_tuesday(today)
+    expiry = listed_expiry(today, include_today=True)
     try:
         resolved = resolve_option_ids([atm - 50, atm, atm + 50], expiry)
     except Exception as exc:
@@ -626,6 +670,7 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
     expected = [(int(c["strike"]), str(c["option_type"])) for c in contracts]
     if len(expected) != 6:
         logger.warning("[{}] AUTO-ENTRY: expected 6 contracts, got {} — aborting", vid, len(expected))
+        _set_position_status(active_path, "aborted", f"expected 6 contracts, got {len(expected)}")
         send_telegram(
             f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n"
             f"Expected 6 resolved contracts, got {len(expected)}. No position opened."
@@ -640,6 +685,7 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         ready = sum(1 for v in ltps if v is not None)
         logger.warning("[{}] AUTO-ENTRY: only {}/6 leg LTPs arrived within {}s — aborting",
                         vid, ready, _ENTRY_LTP_TIMEOUT_S)
+        _set_position_status(active_path, "aborted", f"only {ready}/6 leg LTPs within {_ENTRY_LTP_TIMEOUT_S}s")
         send_telegram(
             f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n"
             f"Only {ready}/6 leg LTPs received within {_ENTRY_LTP_TIMEOUT_S // 60} minutes "
@@ -798,6 +844,8 @@ def main() -> None:
 
     try:
         while True:
+            for variant in LADDER_VARIANTS:
+                _retire_stale_position(variant)
             cfg = _read_cfg()
             if cfg:
                 for variant in LADDER_VARIANTS:

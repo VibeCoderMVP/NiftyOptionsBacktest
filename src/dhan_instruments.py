@@ -54,26 +54,17 @@ def download_instruments_csv(force: bool = False) -> Path:
         ) from exc
 
 
-def resolve_option_ids(
-    strikes: list[int],
-    expiry_date: date,
-    underlying: str = "NIFTY",
-) -> list[dict]:
-    """
-    Look up Dhan security IDs for a set of NIFTY option strikes.
+def _parse_expiry(s: str) -> str:
+    """Return YYYY-MM-DD regardless of input format (handles time components too)."""
+    try:
+        return pd.to_datetime(str(s).strip()).strftime("%Y-%m-%d")
+    except Exception:
+        return str(s).strip()[:10]  # fallback: take first 10 chars
 
-    Returns a list of dicts (one per leg, in the same order as the input strike list
-    × ['CE', 'PE'] pairs):
-      [{
-        "strike": 24000,
-        "option_type": "CE",
-        "security_id": "49081",
-        "exchange_segment": "NSE_FNO",
-      }, ...]
 
-    Raises RuntimeError if the instruments CSV cannot be loaded or no matching
-    contracts are found for the given expiry.
-    """
+def _load_underlying_options(underlying: str) -> tuple[pd.DataFrame, dict[str, str | None]]:
+    """Load the instruments master and return (option rows for `underlying` with a
+    normalised `_expiry_norm` YYYY-MM-DD column, resolved column names)."""
     csv_path = download_instruments_csv()
 
     try:
@@ -131,19 +122,51 @@ def resolve_option_ids(
             f"Check the CSV is current."
         )
 
-    # Normalise expiry date column — Dhan uses "YYYY-MM-DD" but has varied
-    expiry_str = expiry_date.strftime("%Y-%m-%d")
+    nifty["_expiry_norm"] = nifty[col_expiry].astype(str).apply(_parse_expiry)
+    cols = {"strike": col_strike, "type": col_type, "secid": col_secid}
+    return nifty, cols
 
-    def _try_parse_expiry(s: str) -> str:
-        """Return YYYY-MM-DD regardless of input format (handles time components too)."""
+
+def list_option_expiries(underlying: str = "NIFTY") -> list[date]:
+    """All distinct option expiry dates for `underlying` in the instruments master,
+    sorted ascending. This is the exchange's real calendar -- holiday-shifted expiries
+    (e.g. a Tuesday holiday moving expiry to Monday) show up here as-is, which is why
+    callers should prefer it over computing "next Tuesday" arithmetically."""
+    nifty, cols = _load_underlying_options(underlying)
+    nifty = nifty[nifty[cols["type"]].astype(str).isin(["CE", "PE"])]
+    out: set[date] = set()
+    for s in nifty["_expiry_norm"].unique():
         try:
-            import pandas as _pd
-            return _pd.to_datetime(str(s).strip()).strftime("%Y-%m-%d")
-        except Exception:
-            return str(s).strip()[:10]  # fallback: take first 10 chars
+            out.add(date.fromisoformat(str(s)))
+        except ValueError:
+            continue
+    return sorted(out)
 
-    nifty = nifty.copy()
-    nifty["_expiry_norm"] = nifty[col_expiry].astype(str).apply(_try_parse_expiry)
+
+def resolve_option_ids(
+    strikes: list[int],
+    expiry_date: date,
+    underlying: str = "NIFTY",
+) -> list[dict]:
+    """
+    Look up Dhan security IDs for a set of NIFTY option strikes.
+
+    Returns a list of dicts (one per leg, in the same order as the input strike list
+    × ['CE', 'PE'] pairs):
+      [{
+        "strike": 24000,
+        "option_type": "CE",
+        "security_id": "49081",
+        "exchange_segment": "NSE_FNO",
+      }, ...]
+
+    Raises RuntimeError if the instruments CSV cannot be loaded or no matching
+    contracts are found for the given expiry.
+    """
+    nifty, cols = _load_underlying_options(underlying)
+    col_strike, col_type, col_secid = cols["strike"], cols["type"], cols["secid"]
+
+    expiry_str = expiry_date.strftime("%Y-%m-%d")
     nifty = nifty[nifty["_expiry_norm"] == expiry_str]
 
     if nifty.empty:

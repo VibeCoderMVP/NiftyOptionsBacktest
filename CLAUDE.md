@@ -358,6 +358,12 @@ Written at `D:\Trading\active_options_position.json`. Shared between this repo, 
 - Updated by `paper_trade.log_entry()` (fills in entry_ltp for each leg)
 - Watched by `tick_service.py` (subscribes to NSE_FNO contracts, publishes `OPT_` ticks)
 - Closed by `paper_trade.log_exit()` (status=closed)
+- `status` can also be `aborted` (scheduler gave up on an entry after writing the file) or
+  `expired_stale` (still `open` after its `expiry_date` -- retired by
+  `scheduler.py::_retire_stale_position()` with a Telegram alert). Every consumer treats
+  anything but `open` as inactive. `signal.py::write_active_position()` now raises instead of
+  writing an `open` file with missing security IDs (fixed 2026-11-04, see "Expiry calendar"
+  below).
 - Read by EasyTerminal auto-entry to know which legs to wait for LTPs
 
 ---
@@ -441,7 +447,17 @@ this same revision.
 
 **Windows SSL:** `truststore.inject_into_ssl()` called at fetcher + signal module load. Required for Dhan's cert chain on Windows. Do not remove.
 
-**Holiday handling:** When expiry day is a market holiday, NSE moves expiry to previous Wednesday. `compute_cycle_pnl()` in backtest.py falls back to Wednesday if Thursday/Tuesday data is absent.
+**Expiry calendar (live path, fixed 2026-11-04):** the live signal/scheduler/journal no
+longer compute expiry as "next Tuesday". `src/signal.py::listed_expiry()` picks the nearest
+NIFTY expiry actually listed in Dhan's instruments master (`dhan_instruments.
+list_option_expiries()`), so holiday-shifted weeks (e.g. Mon 2026-11-09, Mon 2026-11-23) resolve
+correctly; the Tuesday rule is only a logged fallback if the master can't be read. Before this,
+the 2026-10-15 entry picked 2026-10-20 (not listed), aborted with 0/6 LTPs, and its ID-less
+`open` position file silently blocked the 10-22 and 10-29 entries for both ladders.
+`paper_trade.log_entry()` takes the journal's `expiry_date` from the active position file for
+the same reason.
+
+**Holiday handling (backtest):** When expiry day is a market holiday, NSE moves expiry to previous Wednesday. `compute_cycle_pnl()` in backtest.py falls back to Wednesday if Thursday/Tuesday data is absent.
 
 **Rolling data coverage gap:** When Nifty moves >200 pts during the week, entry strikes fall outside the ATM±4 relative range on exit day → exit LTP is absent. `analyse_trades.py` infers intrinsic value (`max(exit_spot - strike, 0.05)` for CE) from the exit-day spot price. These are marked with `*`.
 
