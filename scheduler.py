@@ -26,6 +26,9 @@ Four jobs, checked every 30s in IST, config from D:\\Trading\\options_config.jso
         message with the confirmed total premium collected — this is the message
         that was missing; the order-slip alert in (a) only has the *proposed*
         legs, not what they actually sold for.
+   Thursday-holiday -> Friday 15:10 shift, and a missed normal Thursday -> Friday
+   09:16-09:30 catch-up at Friday's open: see _entry_shift_today() /
+   _try_missed_entry_catchup() and CLAUDE.md.
 
 2. Auto-exit — position open, expiry_date == today, at/after exit_time_ist
    (default 15:25): same LTP wait (positions have been ticking all week so this
@@ -289,6 +292,7 @@ class NiftySpotCollector:
     def __init__(self) -> None:
         self._ltp: float | None = None
         self._session_open: float | None = None
+        self._session_open_at: datetime | None = None
         self._today: date | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -319,6 +323,7 @@ class NiftySpotCollector:
                     if self._today != today:
                         self._today = today
                         self._session_open = ltp
+                        self._session_open_at = _ist_now()
                     self._ltp = ltp
         finally:
             sub.close()
@@ -334,6 +339,10 @@ class NiftySpotCollector:
     def session_open(self) -> float | None:
         with self._lock:
             return self._session_open
+
+    def session_open_with_time(self) -> tuple[float | None, datetime | None]:
+        with self._lock:
+            return self._session_open, self._session_open_at
 
 
 _STRIKE_BAND_OFFSETS = list(range(-300, 301, 50))  # 13 strikes: ATM-300..ATM+300 step 50
@@ -642,13 +651,111 @@ def _entry_shift_today(today: date, entry_weekday: int) -> str | None | bool:
             send_telegram(
                 f"NIFTY WEEKLY OPTIONS - HOLIDAY CALENDAR MISSING FOR {prev.year}\n"
                 f"Add NSE's {prev.year} F&O holiday list to trading_core/market_calendar.py. "
-                "Until then a Thursday-holiday entry will not shift to Friday."
+                "Until then a Thursday-holiday entry will not shift to Friday, and a missed "
+                "Thursday won't get the Friday-open catch-up."
             )
         return False
     return _HOLIDAY_SHIFT_TAG if prev_trading is False else False
 
 
-def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
+_CATCHUP_TAG = "missed_thu_catchup_fri_open"
+_CATCHUP_START = (9, 16)          # first full minute after the 09:15 open -- Dhan's OHLC "open" is today's by then
+_CATCHUP_END = (9, 30)            # 15 min after the open: past this the whole week is skipped
+_CATCHUP_RETRY_S = 60             # retry a failed attempt inside the window (the "cushion")
+_CATCHUP_MIN_LTP_WAIT_S = 20      # don't start an attempt with less than this left in the window
+
+
+def _has_entry_since(journal_path: Path, since: date) -> bool:
+    if not journal_path.exists():
+        return False
+    for line in journal_path.read_text(encoding="utf-8").splitlines():
+        try:
+            if str(json.loads(line).get("entry_date", "")) >= str(since):
+                return True
+        except json.JSONDecodeError:
+            continue
+    return False
+
+
+def _catchup_applies(today: date, entry_weekday: int) -> bool:
+    """Today is the day after a NORMAL trading entry day (Fri after a non-holiday Thu).
+    A holiday Thursday is _entry_shift_today()'s 15:10 path instead; an uncovered
+    calendar year is neither (can't tell a holiday from an outage)."""
+    prev = today - timedelta(days=1)
+    return (prev.weekday() == entry_weekday and is_fo_trading_day(prev) is True
+            and is_fo_trading_day(today) is not False)
+
+
+def _session_open_price(nifty_spot: "NiftySpotCollector | None", now: datetime) -> tuple[float | None, str]:
+    """Today's real NIFTY open. Dhan REST OHLC first (true exchange open regardless of
+    when this process started); the ZMQ first tick only if that tick itself arrived in
+    the 09:15 minute -- after a late start it's just the price at startup, not the open."""
+    px = get_nifty_open()
+    if px is not None:
+        return px, "REST OHLC open"
+    if nifty_spot is not None:
+        zo, at = nifty_spot.session_open_with_time()
+        if zo is not None and at is not None and at.date() == now.date() and (at.hour, at.minute) == (9, 15):
+            return zo, f"ZMQ first tick {at:%H:%M:%S}"
+    return None, "REST open unavailable and no 09:15 ZMQ first tick"
+
+
+def _try_missed_entry_catchup(
+    variant: dict, collector: LtpCollector, fired: dict, nifty_spot: "NiftySpotCollector | None",
+    now: datetime,
+) -> None:
+    """Thursday was a normal trading day but no entry happened (machine off, no internet,
+    every attempt failed): enter on Friday, ATM from Friday's OPEN, legs at their live
+    prices at entry time, only between 09:16 and 09:30. Past 09:30 the week is skipped."""
+    vid = variant["id"]
+    today = now.date()
+    prev = today - timedelta(days=1)
+    if _has_entry_since(_journal_path_for(variant), prev):
+        return
+    pos = _read_active_position(variant["active_path"])
+    if pos and pos.get("status") == "open":
+        return
+    if (now.hour, now.minute) < _CATCHUP_START:
+        return
+    window_end = now.replace(hour=_CATCHUP_END[0], minute=_CATCHUP_END[1], second=0, microsecond=0)
+    if now >= window_end:
+        if fired.get(f"catchup_skip_{vid}") != today:
+            fired[f"catchup_skip_{vid}"] = today
+            reason = fired.get(f"catchup_lastfail_{vid}") or "no attempt ran inside the window (scheduler not up?)"
+            logger.warning("[{}] MISSED-ENTRY CATCH-UP: no entry by {:02d}:{:02d} -- week of {} skipped ({})",
+                           vid, *_CATCHUP_END, prev, reason)
+            send_telegram(
+                f"NIFTY WEEKLY OPTIONS [{vid}] - WEEK SKIPPED\n"
+                f"No entry on {prev} ({prev:%a}) and the Friday catch-up didn't complete by "
+                f"{_CATCHUP_END[0]:02d}:{_CATCHUP_END[1]:02d}.\nLast reason: {reason}"
+            )
+        return
+    last = fired.get(f"catchup_{vid}")
+    if isinstance(last, float) and time.monotonic() - last < _CATCHUP_RETRY_S:
+        return
+    remaining = (window_end - now).total_seconds()
+    if remaining < _CATCHUP_MIN_LTP_WAIT_S:
+        return
+    fired[f"catchup_{vid}"] = time.monotonic()
+
+    open_px, src = _session_open_price(nifty_spot, now)
+    if open_px is None:
+        fired[f"catchup_lastfail_{vid}"] = src
+        logger.warning("[{}] MISSED-ENTRY CATCH-UP: {} -- retrying in {}s", vid, src, _CATCHUP_RETRY_S)
+        return
+    logger.info("[{}] MISSED-ENTRY CATCH-UP triggered at {} IST: no entry on {}, ATM from {} {:.2f}",
+                vid, now.strftime("%H:%M:%S"), prev, src, open_px)
+    ok, reason = _execute_entry(variant, collector, now, _CATCHUP_TAG, spot=open_px,
+                                ltp_timeout_s=int(min(_ENTRY_LTP_TIMEOUT_S, remaining)),
+                                alert_failures=False, spot_label=f"Fri open ({src})")
+    if not ok:
+        fired[f"catchup_lastfail_{vid}"] = reason
+
+
+def _try_auto_entry(
+    cfg: dict, variant: dict, collector: LtpCollector, fired: dict,
+    nifty_spot: "NiftySpotCollector | None" = None,
+) -> None:
     vid = variant["id"]
     if not _variant_entry_enabled(cfg, variant):
         return
@@ -659,6 +766,10 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         eh, em = (int(x) for x in FO_TRADING_DECISION_CUTOFF.split(":"))
     entry_weekday = int(cfg.get("entry_weekday", 3))
 
+    if _catchup_applies(now.date(), entry_weekday):
+        _try_missed_entry_catchup(variant, collector, fired, nifty_spot, now)
+        return
+
     entry_shift = _entry_shift_today(now.date(), entry_weekday)
     if entry_shift is False:
         return
@@ -667,10 +778,7 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
     if fired.get(f"entry_{vid}") == now.date():
         return
 
-    active_path = variant["active_path"]
-    journal_path = _journal_path_for(variant)
-
-    pos = _read_active_position(active_path)
+    pos = _read_active_position(variant["active_path"])
     if pos and pos.get("status") == "open":
         return  # already have an open position — nothing to do
 
@@ -678,10 +786,35 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
     fired[f"entry_{vid}"] = now.date()
     logger.info("[{}] AUTO-ENTRY triggered at {} IST{}", vid, now.strftime("%H:%M:%S"),
                 f" ({entry_shift}: {now.date() - timedelta(days=1)} was an NSE holiday)" if entry_shift else "")
+    _execute_entry(variant, collector, now, entry_shift)
+
+
+_SHIFT_NOTES = {
+    _HOLIDAY_SHIFT_TAG: " -- HOLIDAY-SHIFTED, previous day was an NSE holiday",
+    _CATCHUP_TAG: " -- CATCH-UP, previous day's entry was missed; ATM from today's open",
+}
+
+
+def _execute_entry(
+    variant: dict, collector: LtpCollector, now: datetime, entry_shift: str | None,
+    spot: float | None = None, ltp_timeout_s: int = _ENTRY_LTP_TIMEOUT_S,
+    alert_failures: bool = True, spot_label: str = "Spot",
+) -> tuple[bool, str]:
+    """Signal -> wait for the 6 leg LTPs -> paper fill -> alerts. Returns (opened, reason).
+    spot=None fetches the live spot (normal 15:10 entry); a value is used as-is for ATM."""
+    vid = variant["id"]
+    active_path = variant["active_path"]
+    journal_path = _journal_path_for(variant)
+
+    def fail(reason: str) -> tuple[bool, str]:
+        if alert_failures:
+            send_telegram(f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n{reason}")
+        return False, reason
 
     try:
         run_signal(
             force=True,
+            spot=spot,
             offset=variant["offset"],
             active_path=active_path,
             variant_label=vid,
@@ -690,45 +823,32 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         )
     except Exception as exc:
         logger.error("[{}] AUTO-ENTRY: run_signal() failed: {}", vid, exc)
-        send_telegram(f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\nrun_signal() raised: {exc}")
-        return
+        return fail(f"run_signal() raised: {exc}")
 
     pos = _read_active_position(active_path)
     if not pos or pos.get("status") != "open":
         logger.warning("[{}] AUTO-ENTRY: active position file not open after run_signal — aborting", vid)
-        send_telegram(
-            f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n"
-            "Active position file was not left in an open state after signal — "
-            "check Dhan API / security ID resolution."
-        )
-        return
+        return fail("Active position file was not left in an open state after signal — "
+                    "check Dhan API / security ID resolution.")
 
     contracts = pos.get("contracts", [])
     expected = [(int(c["strike"]), str(c["option_type"])) for c in contracts]
     if len(expected) != 6:
         logger.warning("[{}] AUTO-ENTRY: expected 6 contracts, got {} — aborting", vid, len(expected))
         _set_position_status(active_path, "aborted", f"expected 6 contracts, got {len(expected)}")
-        send_telegram(
-            f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n"
-            f"Expected 6 resolved contracts, got {len(expected)}. No position opened."
-        )
-        return
+        return fail(f"Expected 6 resolved contracts, got {len(expected)}. No position opened.")
 
     # Give this variant its own dedicated feed, independent of the strike-band monitor.
     _subscribe_variant_legs(variant, pos)
 
-    ltps = collector.wait_for(expected, _ENTRY_LTP_TIMEOUT_S)
+    ltps = collector.wait_for(expected, ltp_timeout_s)
     if any(v is None for v in ltps):
         ready = sum(1 for v in ltps if v is not None)
         logger.warning("[{}] AUTO-ENTRY: only {}/6 leg LTPs arrived within {}s — aborting",
-                        vid, ready, _ENTRY_LTP_TIMEOUT_S)
-        _set_position_status(active_path, "aborted", f"only {ready}/6 leg LTPs within {_ENTRY_LTP_TIMEOUT_S}s")
-        send_telegram(
-            f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\n"
-            f"Only {ready}/6 leg LTPs received within {_ENTRY_LTP_TIMEOUT_S // 60} minutes "
-            f"of signal. No position opened — check tick_service / P2 status."
-        )
-        return
+                        vid, ready, ltp_timeout_s)
+        _set_position_status(active_path, "aborted", f"only {ready}/6 leg LTPs within {ltp_timeout_s}s")
+        return fail(f"Only {ready}/6 leg LTPs received within {ltp_timeout_s}s of signal. "
+                    "No position opened — check tick_service / P2 status.")
 
     atm  = int(pos["atm"])
     spot = float(pos["entry_spot"])
@@ -740,8 +860,7 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         )
     except Exception as exc:
         logger.error("[{}] AUTO-ENTRY: log_entry() failed: {}", vid, exc)
-        send_telegram(f"NIFTY WEEKLY OPTIONS [{vid}] - AUTO-ENTRY FAILED\nlog_entry() raised: {exc}")
-        return
+        return fail(f"log_entry() raised: {exc}")
 
     total_premium = sum(ltps)
     lot_size = record.get("lot_size") or lot_size_for_date(date.fromisoformat(record["expiry_date"]))
@@ -753,10 +872,9 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
         "Legs tracked (paper SELL 1 lot each -- no real orders):"
     msg = "\n".join([
         f"NIFTY WEEKLY OPTIONS [{vid}] - 3L STRADDLE OPENED{paper_tag}",
-        f"Entry : {now.strftime('%Y-%m-%d %H:%M')} IST ({now:%a})"
-        + (" -- HOLIDAY-SHIFTED, previous day was an NSE holiday" if entry_shift else ""),
+        f"Entry : {now.strftime('%Y-%m-%d %H:%M')} IST ({now:%a})" + _SHIFT_NOTES.get(entry_shift, ""),
         f"Expiry: {record['expiry_date']}",
-        f"Spot  : {spot:.2f}  |  ATM: {atm}",
+        f"{spot_label}: {spot:.2f}  |  ATM: {atm}",
         "",
         action_line,
         *leg_lines,
@@ -769,6 +887,7 @@ def _try_auto_entry(cfg: dict, variant: dict, collector: LtpCollector, fired: di
     _log_event("entry", vid, atm=atm, entry_spot=spot, expiry_date=record["expiry_date"],
                total_premium_pts=total_premium, rs_collected=rs_collected,
                entry_time_str=now.strftime("%Y-%m-%d %H:%M"), entry_shift=entry_shift)
+    return True, "opened"
 
 
 def _try_auto_exit(cfg: dict, variant: dict, collector: LtpCollector, fired: dict[str, date]) -> None:
@@ -874,7 +993,7 @@ def main() -> None:
             "first preview cycle will fall back to REST", _NIFTY_TICK_WAIT_S,
         )
 
-    fired: dict[str, date] = {}
+    fired: dict = {}
     preview = PreviewState()
     band = StrikeBandState()
     last_hb = time.monotonic()
@@ -887,7 +1006,7 @@ def main() -> None:
             cfg = _read_cfg()
             if cfg:
                 for variant in LADDER_VARIANTS:
-                    _try_auto_entry(cfg, variant, collector, fired)
+                    _try_auto_entry(cfg, variant, collector, fired, nifty_spot)
                     _try_auto_exit(cfg, variant, collector, fired)
 
             pos = _read_active_position()

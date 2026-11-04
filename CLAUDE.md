@@ -472,6 +472,23 @@ Verified with a simulated holiday week through the real `_try_auto_entry` (stubb
 signal, ticks and Telegram; temp files). No real Thursday holiday is left in 2026, so the
 first live case is in 2027 -- after that year's list is added.
 
+**Missed-Thursday catch-up (added 2026-11-04):** if Thursday was a normal trading day but a
+ladder has no journal entry since then (machine off, no internet, every attempt failed),
+`scheduler.py::_try_missed_entry_catchup()` enters on Friday.
+- **Window:** 09:16-09:30 only. 09:16 rather than 09:15 so Dhan's OHLC "open" is Friday's.
+- **Prices:** ATM comes from Friday's **open** (Dhan REST `/marketfeed/ohlc` open; fallback is
+  the ZMQ first NIFTY tick, but only if that tick arrived in the 09:15 minute). The legs are
+  filled at their live LTPs at entry time.
+- **Retries:** a failed attempt retries every 60s inside the window with no per-try Telegram.
+  The LTP wait is capped to the time left in the window.
+- **Past 09:30 with no entry:** one `WEEK SKIPPED` Telegram per ladder (with the last failure
+  reason), and nothing more that week.
+- **Tagging:** journal `entry_shift: "missed_thu_catchup_fri_open"`.
+- **Not applied** to a Thursday holiday (that's the 15:10 shift above) or to an uncovered
+  calendar year.
+- **Unverified live:** the REST OHLC open at 09:16 has only been seen working off-hours. The
+  entry log line records which source was used and the value, so check it on the first real use.
+
 **Holiday handling (backtest):** When expiry day is a market holiday, NSE moves expiry to previous Wednesday. `compute_cycle_pnl()` in backtest.py falls back to Wednesday if Thursday/Tuesday data is absent.
 
 **Rolling data coverage gap:** When Nifty moves >200 pts during the week, entry strikes fall outside the ATM±4 relative range on exit day → exit LTP is absent. `analyse_trades.py` infers intrinsic value (`max(exit_spot - strike, 0.05)` for CE) from the exit-day spot price. These are marked with `*`.
