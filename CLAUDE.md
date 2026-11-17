@@ -1,5 +1,9 @@
 # NiftyOptionsBacktest — Claude Instructions
 
+> **2026-11-18 forward-test review — KEPT, grade B−** ([D:/Trading/docs/FORWARD_TEST_REVIEW_2026-11-18.md](D:/Trading/docs/FORWARD_TEST_REVIEW_2026-11-18.md), window 2026-07-18..11-17, net of costs, open positions marked at the 11-17 close).
+> OPT-3L50: 15 weeks, win 60%, PF 1.51, +Rs62,817. OPT-3L100: 14 weeks, win 57%, PF 1.47, +Rs54,435.
+> Both lost about Rs50k in October (Phase-B PF about 0.43). Small sample; keep running.
+
 ## What This Project Does
 
 Two things in one repo:
